@@ -40,7 +40,7 @@ const COLORS = {
   warning: '#f39c12',
 };
 
-// Opciones predefinidas
+// OpciOLA SE SUBIO
 const SETS_OPTIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
 const REPS_OPTIONS = [5, 8, 10, 12, 15, 20, 25, 30, 40, 50];
 const DURATION_OPTIONS = [5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60];

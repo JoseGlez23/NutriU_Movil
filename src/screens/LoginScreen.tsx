@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { 
-  View, Text, TextInput, StyleSheet, TouchableOpacity,
+  View, Text, TextInput, StyleSheet, TouchableOpacity, Image,
   KeyboardAvoidingView, Platform, ScrollView, ActivityIndicator,
   Modal, StatusBar, Dimensions, Animated, Easing, Alert
 } from 'react-native';
@@ -305,8 +305,7 @@ export default function LoginScreen({ navigation }: any) {
       <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={{ flex: 1 }}>
         <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
           <View style={styles.header}>
-            <Text style={styles.brandName}>NUTRI U</Text>
-            <View style={styles.underline} />
+            <Image source={require('../../assets/logo.png')} style={styles.logo} resizeMode="contain" />
             <Text style={styles.subtitle}>{isLogin ? 'App de Nutrición y Salud' : 'Registro de Paciente'}</Text>
           </View>
 
@@ -545,9 +544,8 @@ const styles = StyleSheet.create({
     bottom: -height * 0.06,
     backgroundColor: COLORS.accent,
   },
-  header: { alignItems: 'center', marginBottom: 30 },
-  brandName: { fontSize: 32, fontWeight: '900', color: COLORS.primary, letterSpacing: 2 },
-  underline: { width: 40, height: 4, backgroundColor: COLORS.accent, marginTop: 5, borderRadius: 2 },
+  header: { alignItems: 'center', justifyContent: 'center', width: '100%', marginBottom: 30 },
+  logo: { width: 180, height: 90, alignSelf: 'center' },
   subtitle: { color: COLORS.textLight, marginTop: 10, fontSize: 14, fontWeight: '300', textAlign: 'center' },
   card: { backgroundColor: COLORS.white, borderRadius: 20, padding: 20, elevation: 5, shadowColor: '#000', shadowOffset: { width: 0, height: 10 }, shadowOpacity: 0.05, shadowRadius: 15 },
   row: { flexDirection: 'row', marginBottom: 15 },

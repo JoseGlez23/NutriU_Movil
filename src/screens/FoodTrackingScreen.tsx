@@ -22,6 +22,8 @@ import { useNutriologo } from '../context/NutriologoContext';
 import { foodService } from '../services/foodService';
 import { supabase } from '../lib/supabase';
 import { Ionicons } from '@expo/vector-icons';
+import { useNetwork } from '../utils/NetworkHandler';
+import NetInfo from '@react-native-community/netinfo';
 
 const COLORS = {
   primary: '#2E8B57',
@@ -91,6 +93,7 @@ const parseTimestampAsUTC = (value?: string | null): Date | null => {
 
 export default function FoodTrackingScreen({ navigation }: any) {
   const { user, updatePoints } = useUser();
+  const { isOffline } = useNetwork();
   const { 
     estadoNutriologo, 
     loading: nutriologoLoading, 
@@ -113,6 +116,18 @@ export default function FoodTrackingScreen({ navigation }: any) {
   const [isRegistering, setIsRegistering] = useState(false);
   const [todayDayIndex, setTodayDayIndex] = useState(0);
   const [registeredMealsToday, setRegisteredMealsToday] = useState<Set<string>>(new Set());
+
+  const ensureOnlineForWrite = async (message = 'Sin internet solo puedes ver tu plan. No puedes registrar comida.') => {
+    const netInfo = await NetInfo.fetch();
+    const online = Boolean(netInfo.isConnected && netInfo.isInternetReachable !== false);
+
+    if (!online) {
+      Alert.alert('Sin conexión', message);
+      return false;
+    }
+
+    return true;
+  };
 
   // Loading animation values
   const spinValue = useRef(new Animated.Value(0)).current;
@@ -359,6 +374,10 @@ export default function FoodTrackingScreen({ navigation }: any) {
   };
 
   const confirmRegister = async () => {
+    if (!(await ensureOnlineForWrite())) {
+      return;
+    }
+
     if (!user?.id_paciente) {
       Alert.alert('Error', 'No se encontró ID de paciente.');
       return;
@@ -667,9 +686,11 @@ export default function FoodTrackingScreen({ navigation }: any) {
                   key={idx}
                   style={[
                     styles.foodItem,
-                    (isRegistered && isToday) && styles.disabledItem
+                    (isRegistered && isToday) && styles.disabledItem,
+                    isOffline && styles.disabledItem
                   ]}
-                  onPress={() => {
+                  onPress={async () => {
+                    if (!(await ensureOnlineForWrite('Sin internet solo puedes ver tu plan.'))) return;
                     if (!isToday) {
                       Alert.alert('Solo hoy', 'Solo puedes registrar alimentos para el día de hoy.');
                       return;
@@ -693,7 +714,7 @@ export default function FoodTrackingScreen({ navigation }: any) {
                     });
                     setAmount('100');
                   }}
-                  disabled={isRegistering || (isRegistered && isToday)}
+                  disabled={isOffline || isRegistering || (isRegistered && isToday)}
                 >
                   <View style={styles.foodContent}>
                     <View style={styles.foodInfo}>
@@ -1068,6 +1089,13 @@ export default function FoodTrackingScreen({ navigation }: any) {
                 Cantidad (máx sugerido: {selectedFood?.max || 999})
               </Text>
 
+              {isOffline && (
+                <View style={styles.offlineReadOnlyBanner}>
+                  <Ionicons name="cloud-offline-outline" size={16} color={COLORS.warning} />
+                  <Text style={styles.offlineReadOnlyText}>Sin conexión: solo lectura, no puedes registrar comida.</Text>
+                </View>
+              )}
+
               {/* Indicador fuerte si ya está registrada */}
               {registeredMealsToday.has(selectedFood?.type) && (
                 <View style={{ 
@@ -1096,14 +1124,14 @@ export default function FoodTrackingScreen({ navigation }: any) {
                 <TextInput
                   style={[
                     styles.inputMassive,
-                    registeredMealsToday.has(selectedFood?.type) && { color: COLORS.disabled }
+                    (registeredMealsToday.has(selectedFood?.type) || isOffline) && { color: COLORS.disabled }
                   ]}
                   keyboardType="numeric"
                   value={amount}
                   onChangeText={handleAmountChange}
                   placeholder="0"
                   autoFocus
-                  editable={!isRegistering && !registeredMealsToday.has(selectedFood?.type)}
+                  editable={!isOffline && !isRegistering && !registeredMealsToday.has(selectedFood?.type)}
                 />
                 <Text style={styles.unitSmall}>
                   {selectedFood?.unit?.toUpperCase() || 'G'}
@@ -1113,9 +1141,9 @@ export default function FoodTrackingScreen({ navigation }: any) {
               <TouchableOpacity
                 style={[
                   styles.btnConfirm,
-                  (!amount || isRegistering || registeredMealsToday.has(selectedFood?.type)) && { backgroundColor: COLORS.border }
+                  (!amount || isOffline || isRegistering || registeredMealsToday.has(selectedFood?.type)) && { backgroundColor: COLORS.border }
                 ]}
-                disabled={!amount || isRegistering || registeredMealsToday.has(selectedFood?.type)}
+                disabled={!amount || isOffline || isRegistering || registeredMealsToday.has(selectedFood?.type)}
                 onPress={confirmRegister}
               >
                 {isRegistering ? (
@@ -1551,6 +1579,26 @@ const styles = StyleSheet.create({
     color: COLORS.white,
     fontWeight: '700',
     fontSize: 14,
+  },
+  offlineReadOnlyBanner: {
+    width: '100%',
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: COLORS.secondary,
+    borderWidth: 1,
+    borderColor: COLORS.warning,
+    borderRadius: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    marginTop: 8,
+    marginBottom: 6,
+    gap: 8,
+  },
+  offlineReadOnlyText: {
+    flex: 1,
+    fontSize: 12,
+    color: COLORS.textLight,
+    fontWeight: '700',
   },
 
   // Estilos para días bloqueados

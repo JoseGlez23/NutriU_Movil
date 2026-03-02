@@ -5,8 +5,8 @@ import { Platform } from 'react-native';
 import * as SecureStore from 'expo-secure-store';
 
 // Configura tus credenciales de Supabase aquí
-const SUPABASE_URL = 'https://hthnkzwjotwqhvjgqhfv.supabase.co'; // Reemplaza con tu URL
-const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imh0aG5rendqb3R3cWh2amdxaGZ2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njc2ODc0NTAsImV4cCI6MjA4MzI2MzQ1MH0.lksveye2arHlQXyuLdLrZmcbIqmdyUUvVZPl5rW_qUQ'; // Reemplaza con tu anon key
+const SUPABASE_URL = process.env.EXPO_PUBLIC_SUPABASE_URL!;
+const SUPABASE_ANON_KEY = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY!;
 
 // Adaptador de almacenamiento para Expo
 const ExpoSecureStoreAdapter = {

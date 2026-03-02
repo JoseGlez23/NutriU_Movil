@@ -25,6 +25,7 @@ import { supabase } from '../lib/supabase';
 import { saveToCache, getFromCache } from '../utils/offlineCache';
 import NetInfo from '@react-native-community/netinfo';
 import { useNetwork } from '../utils/NetworkHandler';
+import { patientPlanService } from '../services/patientPlanService';
 
 const { width, height } = Dimensions.get('window');
 
@@ -41,6 +42,35 @@ const COLORS = {
   accept: '#4CAF50',
   reject: '#F44336',
   pending: '#FFC107',
+};
+
+const TIMEZONE = 'America/Hermosillo'; // San Luis Río Colorado, Sonora
+
+const parseDbTimestampAsUtc = (value: string) => {
+  const baseValue = String(value || '').trim().replace(' ', 'T');
+  const hasTimezone = /([zZ]|[+\-]\d{2}(?::?\d{2})?)$/.test(baseValue);
+
+  if (hasTimezone) {
+    return new Date(baseValue);
+  }
+
+  const match = baseValue.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?(?:\.(\d{1,3}))?$/);
+  if (!match) {
+    return new Date(`${baseValue}Z`);
+  }
+
+  const [, year, month, day, hour, minute, second = '00', millis = '0'] = match;
+  const milliseconds = Number(millis.padEnd(3, '0'));
+
+  return new Date(Date.UTC(
+    Number(year),
+    Number(month) - 1,
+    Number(day),
+    Number(hour),
+    Number(minute),
+    Number(second),
+    milliseconds,
+  ));
 };
 
 // Componentes de animación (sin cambios)
@@ -249,6 +279,26 @@ export default function DashboardScreen({ navigation }: any) {
   // Estado para notificaciones desde Supabase
   const [notifications, setNotifications] = useState<any[]>([]);
   const [loadingNotifications, setLoadingNotifications] = useState(false);
+  const navigationLockRef = useRef(false);
+
+  const safeNavigate = useCallback((routeName: string, params?: any) => {
+    if (navigationLockRef.current) return;
+
+    navigationLockRef.current = true;
+    navigation.navigate(routeName, params);
+
+    setTimeout(() => {
+      navigationLockRef.current = false;
+    }, 700);
+  }, [navigation]);
+
+  useEffect(() => {
+    const unsubscribe = navigation.addListener('focus', () => {
+      navigationLockRef.current = false;
+    });
+
+    return unsubscribe;
+  }, [navigation]);
 
   const sortNotificationsByDate = (items: any[]) => {
     return [...items].sort((a, b) => {
@@ -341,7 +391,10 @@ export default function DashboardScreen({ navigation }: any) {
         const nutri = cita.nutriologos;
         const doctorName = `Dr. ${nutri.nombre} ${nutri.apellido}`;
         const amount = nutri.tarifa_consulta || 800;
-        const formattedDate = new Date(cita.fecha_hora).toLocaleString('es-MX', {
+        const citaDate = parseDbTimestampAsUtc(cita.fecha_hora);
+
+        const formattedDate = citaDate.toLocaleString('es-MX', {
+          timeZone: TIMEZONE,
           weekday: 'short',
           day: 'numeric',
           month: 'short',
@@ -358,7 +411,7 @@ export default function DashboardScreen({ navigation }: any) {
           tipo: 'cita_pendiente_pago',
           estado: 'pendiente_pago',
           leida: false,
-          fecha_envio: new Date(cita.fecha_hora).toISOString(),
+          fecha_envio: citaDate.toISOString(),
           datos_adicionales: {
             id_cita: cita.id_cita,
             id_nutriologo: nutri.id_nutriologo,
@@ -480,7 +533,7 @@ export default function DashboardScreen({ navigation }: any) {
     setNotificationsVisible(false);
 
     if (citaId && doctorId) {
-      navigation.navigate('Schedule', {
+      safeNavigate('Schedule', {
         initialTab: 'pendientes',
         citaId,
         doctorId,
@@ -490,7 +543,7 @@ export default function DashboardScreen({ navigation }: any) {
       return;
     }
 
-    navigation.navigate('Schedule', { initialTab: 'pendientes' });
+    safeNavigate('Schedule', { initialTab: 'pendientes' });
   };
 
   const handleDenyAppointment = (notification: any) => {
@@ -553,6 +606,11 @@ export default function DashboardScreen({ navigation }: any) {
                 const { error: relationError } = await relationQuery;
 
                 if (relationError) throw relationError;
+
+                const { success: plansCleared, error: clearPlansError } = await patientPlanService.clearActivePlans(user.id_paciente);
+                if (!plansCleared) {
+                  throw new Error(clearPlansError || 'No se pudieron limpiar dieta y rutina activas');
+                }
               }
 
               if (user?.id_paciente) {
@@ -773,8 +831,7 @@ export default function DashboardScreen({ navigation }: any) {
         </TouchableOpacity>
         
         <View style={styles.brandContainer}>
-          <Text style={styles.brandName}>NUTRI U</Text>
-          <View style={styles.underlineSmall} />
+          <Image source={require('../../assets/logo.png')} style={styles.headerLogo} resizeMode="contain" />
         </View>
 
         <View style={styles.headerRight}>
@@ -782,7 +839,7 @@ export default function DashboardScreen({ navigation }: any) {
             onPress={openNotifications}
             unreadCount={unreadCount}
           />
-          <TouchableOpacity onPress={() => navigation.navigate('Profile')} style={styles.profileBtn}>
+          <TouchableOpacity onPress={() => safeNavigate('Profile')} style={styles.profileBtn}>
             <Image 
               source={getImageSource()} 
               style={styles.headerAvatar} 
@@ -815,7 +872,7 @@ export default function DashboardScreen({ navigation }: any) {
 
         <TouchableOpacity 
           style={styles.pointsCard} 
-          onPress={() => navigation.navigate('Points')}
+          onPress={() => safeNavigate('Points')}
           activeOpacity={0.8}
         >
           <View style={styles.pointsRow}>
@@ -843,19 +900,19 @@ export default function DashboardScreen({ navigation }: any) {
             title="NUTRICIÓN" 
             desc="Registro diario" 
             icon="nutrition-outline" 
-            onPress={() => navigation.navigate('FoodTracking')} 
+            onPress={() => safeNavigate('FoodTracking')} 
           />
           <ActionCard 
             title="GIMNASIO" 
             desc="Mis rutinas" 
             icon="barbell-outline" 
-            onPress={() => navigation.navigate('MyRoutines')} 
+            onPress={() => safeNavigate('MyRoutines')} 
           />
           <ActionCard 
             title="CITAS" 
             desc="Agendar con nutriólogo" 
             icon="calendar-outline" 
-            onPress={() => navigation.navigate('Schedule')} 
+            onPress={() => safeNavigate('Schedule')} 
           />
         </View>
       </ScrollView>
@@ -895,6 +952,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
+    position: 'relative',
     paddingTop: 50,
     paddingBottom: 20,
     paddingHorizontal: 20,
@@ -902,11 +960,16 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: COLORS.border,
   },
-  headerIcon: { padding: 5 },
-  brandContainer: { alignItems: 'center' },
-  brandName: { fontSize: 20, fontWeight: '900', color: COLORS.primary, letterSpacing: 1.5 },
-  underlineSmall: { width: 25, height: 3, backgroundColor: COLORS.accent, borderRadius: 2, marginTop: 2 },
-  headerRight: { flexDirection: 'row', alignItems: 'center' },
+  headerIcon: { padding: 5, zIndex: 1 },
+  brandContainer: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  headerLogo: { width: 130, height: 42 },
+  headerRight: { flexDirection: 'row', alignItems: 'center', zIndex: 1 },
   notificationBell: { marginRight: 15, position: 'relative', padding: 5 },
   notificationBadge: {
     position: 'absolute',

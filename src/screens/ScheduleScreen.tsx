@@ -23,6 +23,9 @@ import { useNutriologo } from '../context/NutriologoContext';
 import { supabase } from '../lib/supabase';
 import { useUser } from '../hooks/useUser';
 import { CardField, useStripe } from '@stripe/stripe-react-native';
+import { patientPlanService } from '../services/patientPlanService';
+import { useNetwork } from '../utils/NetworkHandler';
+import NetInfo from '@react-native-community/netinfo';
 
 const { width } = Dimensions.get('window');
 
@@ -59,13 +62,19 @@ const PAYMENT_COLORS = {
   error: '#DC3545',
 };
 
-const CLINIC_OPEN_HOUR = 7;
-const CLINIC_CLOSE_HOUR = 16;
+const TIMEZONE = 'America/Hermosillo';
+
+const parseDbTimestampAsUtc = (value: string) => {
+  const baseValue = String(value || '').trim().replace(' ', 'T');
+  const hasTimezone = /([zZ]|[+\-]\d{2}:\d{2})$/.test(baseValue);
+  return new Date(hasTimezone ? baseValue : `${baseValue}Z`);
+};
 
 export default function ScheduleScreen({ navigation, route }: any) {
   const { user: authUser } = useAuth();
   const { user: patientData, refreshUser } = useUser();
   const { refreshNutriologo, nutriologo } = useNutriologo();
+  const { isOffline } = useNetwork();
 
   const [viewMode, setViewMode] = useState('agendar');
   const [doctors, setDoctors] = useState<any[]>([]);
@@ -92,6 +101,18 @@ export default function ScheduleScreen({ navigation, route }: any) {
 
   const [nutriologoInfoModal, setNutriologoInfoModal] = useState(false);
   const [nutriologoInfoMsg, setNutriologoInfoMsg] = useState('');
+
+  const ensureOnlineForWrite = async (message: string) => {
+    const netInfo = await NetInfo.fetch();
+    const online = Boolean(netInfo.isConnected && netInfo.isInternetReachable !== false);
+
+    if (!online) {
+      Alert.alert('Sin conexión', message);
+      return false;
+    }
+
+    return true;
+  };
 
   const { confirmPayment } = useStripe();
 
@@ -300,16 +321,18 @@ export default function ScheduleScreen({ navigation, route }: any) {
         const nutri: any = Array.isArray(cita.nutriologos) ? cita.nutriologos[0] : cita.nutriologos;
         if (!nutri) return null;
 
-        const fechaHora = new Date(cita.fecha_hora);
+        const fechaHora = parseDbTimestampAsUtc(cita.fecha_hora);
 
-        const fecha = fechaHora.toLocaleDateString('es-MX', { 
+        const fecha = fechaHora.toLocaleDateString('es-MX', {
+          timeZone: TIMEZONE,
           weekday: 'long', 
           day: 'numeric', 
           month: 'long', 
           year: 'numeric' 
         });
 
-        const hora = fechaHora.toLocaleTimeString('es-MX', { 
+        const hora = fechaHora.toLocaleTimeString('es-MX', {
+          timeZone: TIMEZONE,
           hour: 'numeric', 
           minute: '2-digit', 
           hour12: true 
@@ -341,8 +364,8 @@ export default function ScheduleScreen({ navigation, route }: any) {
           estado: estadoReal,
           estadoOriginal: cita.estado,
           id_nutriologo: nutri.id_nutriologo,
-          isCurrentCycle: Number.isFinite(new Date(cita.fecha_hora).getTime())
-            ? new Date(cita.fecha_hora).getTime() >= relationStartMs
+          isCurrentCycle: Number.isFinite(parseDbTimestampAsUtc(cita.fecha_hora).getTime())
+            ? parseDbTimestampAsUtc(cita.fecha_hora).getTime() >= relationStartMs
             : false,
           tienePago,
           pagoInfo: pagos.length > 0 ? pagos[0] : null,
@@ -400,6 +423,10 @@ export default function ScheduleScreen({ navigation, route }: any) {
   }, [nutriologo]);
 
   const handleSelectDoctor = async (doctor: any) => {
+    if (!(await ensureOnlineForWrite('Sin internet solo puedes ver información. No puedes agendar citas.'))) {
+      return;
+    }
+
     if (nutriologo && nutriologo.id_nutriologo !== doctor.realId) {
       Alert.alert(
         'Nutriólogo asignado',
@@ -460,7 +487,11 @@ export default function ScheduleScreen({ navigation, route }: any) {
     );
   };
 
-  const handlePaymentFromPending = (appointment: any) => {
+  const handlePaymentFromPending = async (appointment: any) => {
+    if (!(await ensureOnlineForWrite('Sin internet solo puedes ver tus citas. No puedes pagar ahora.'))) {
+      return;
+    }
+
     setSelectedDoctor({
       name: appointment.doctorName,
       realId: appointment.id_nutriologo,
@@ -471,6 +502,10 @@ export default function ScheduleScreen({ navigation, route }: any) {
   };
 
   const handlePayment = async () => {
+    if (!(await ensureOnlineForWrite('Sin internet no se pueden procesar pagos.'))) {
+      return;
+    }
+
     if (!citaId || !patientData?.id_paciente || !selectedDoctor) {
       Alert.alert('Error', 'No se pudo procesar el pago. Intenta nuevamente.');
       return;
@@ -493,7 +528,7 @@ export default function ScheduleScreen({ navigation, route }: any) {
     setPaymentError(null);
 
     try {
-      const response = await fetch('https://carolin-nonprovisional-correctly.ngrok-free.dev/payments/create-payment-intent', {
+      const response = await fetch('https://servidor-nutri-u.vercel.app/payments/create-payment-intent', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -572,6 +607,11 @@ export default function ScheduleScreen({ navigation, route }: any) {
           
           // Actualizar a activo si estaba inactivo
           if (!relacionExistente.activo) {
+            const { success: plansCleared, error: clearPlansError } = await patientPlanService.clearActivePlans(patientData.id_paciente);
+            if (!plansCleared) {
+              throw new Error(clearPlansError || 'No se pudieron limpiar dieta y rutina activas');
+            }
+
             await supabase
               .from('paciente_nutriologo')
               .update({ activo: true, fecha_asignacion: new Date().toISOString() })
@@ -582,6 +622,11 @@ export default function ScheduleScreen({ navigation, route }: any) {
           console.log('✅ Creando nueva relación con nutriólogo');
           
           const nutriologoId = Number(selectedDoctor.realId);
+
+          const { success: plansCleared, error: clearPlansError } = await patientPlanService.clearActivePlans(patientData.id_paciente);
+          if (!plansCleared) {
+            throw new Error(clearPlansError || 'No se pudieron limpiar dieta y rutina activas');
+          }
           
           // Desactivar relaciones anteriores con otros nutriólogos
           await supabase
@@ -753,11 +798,19 @@ export default function ScheduleScreen({ navigation, route }: any) {
               <Text style={styles.subtitle}>Elige entre todos los nutriólogos disponibles y agenda de forma rápida.</Text>
             </View>
 
+            {isOffline && (
+              <View style={styles.offlineReadOnlyCard}>
+                <Ionicons name="cloud-offline-outline" size={18} color={COLORS.warning} />
+                <Text style={styles.offlineReadOnlyText}>Sin internet: modo solo lectura. Puedes ver nutriólogos, pero no agendar citas.</Text>
+              </View>
+            )}
+
             {doctors.map((doctor) => (
               <TouchableOpacity
                 key={doctor.id}
-                style={styles.doctorCard}
+                style={[styles.doctorCard, isOffline && styles.disabledDoctorCard]}
                 onPress={() => handleSelectDoctor(doctor)}
+                disabled={isOffline}
                 activeOpacity={0.7}
               >
                 <View style={styles.avatarContainer}>
@@ -792,9 +845,9 @@ export default function ScheduleScreen({ navigation, route }: any) {
                       <Text style={styles.priceText}>${doctor.price.toLocaleString('es-MX')}</Text>
                     </View>
 
-                    <View style={styles.doctorActionPill}>
-                      <Text style={styles.doctorActionText}>Agendar</Text>
-                      <Ionicons name="chevron-forward" size={14} color={COLORS.primary} />
+                    <View style={[styles.doctorActionPill, isOffline && styles.disabledActionPill]}>
+                      <Text style={[styles.doctorActionText, isOffline && styles.disabledActionText]}>{isOffline ? 'Sin internet' : 'Agendar'}</Text>
+                      <Ionicons name="chevron-forward" size={14} color={isOffline ? COLORS.textLight : COLORS.primary} />
                     </View>
                   </View>
                 </View>
@@ -847,8 +900,9 @@ export default function ScheduleScreen({ navigation, route }: any) {
                       </View>
                       
                       <TouchableOpacity 
-                        style={styles.payNowButton}
-                        onPress={() => handlePaymentFromPending(appointment)}
+                        style={[styles.payNowButton, isOffline && styles.disabledPayNowButton]}
+                        onPress={async () => handlePaymentFromPending(appointment)}
+                        disabled={isOffline}
                       >
                         <Text style={styles.payNowText}>PAGAR AHORA</Text>
                         <Ionicons name="card-outline" size={16} color={COLORS.white} />
@@ -1118,11 +1172,12 @@ export default function ScheduleScreen({ navigation, route }: any) {
 
                 {selectedAppointment.estado === 'pendiente' && !selectedAppointment.tienePago && (
                   <TouchableOpacity 
-                    style={detailsModalStyles.payButton}
-                    onPress={() => {
+                    style={[detailsModalStyles.payButton, isOffline && detailsModalStyles.payButtonDisabled]}
+                    onPress={async () => {
                       setDetailsModalVisible(false);
-                      handlePaymentFromPending(selectedAppointment);
+                      await handlePaymentFromPending(selectedAppointment);
                     }}
+                    disabled={isOffline}
                   >
                     <Text style={detailsModalStyles.payButtonText}>PAGAR AHORA</Text>
                     <Ionicons name="card-outline" size={18} color={COLORS.white} />
@@ -1204,9 +1259,9 @@ export default function ScheduleScreen({ navigation, route }: any) {
                   )}
 
                   <TouchableOpacity 
-                    style={paymentStyles.payButton}
+                    style={[paymentStyles.payButton, isOffline && paymentStyles.payButtonDisabled]}
                     onPress={handlePayment}
-                    disabled={isProcessing || !cardName.trim()}
+                    disabled={isOffline || isProcessing || !cardName.trim()}
                   >
                     {isProcessing ? (
                       <ActivityIndicator color={PAYMENT_COLORS.buttonText} size="small" />
@@ -1299,7 +1354,7 @@ export default function ScheduleScreen({ navigation, route }: any) {
       </Modal>
     </SafeAreaView>
   );
-}
+};
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: COLORS.secondary },
@@ -1367,7 +1422,27 @@ const styles = StyleSheet.create({
   doctorsSummaryTitle: { fontSize: 14, fontWeight: '800', color: COLORS.textDark },
   doctorsSummarySubtext: { fontSize: 12, color: COLORS.textLight, marginTop: 2 },
 
+  offlineReadOnlyCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: COLORS.white,
+    borderWidth: 1,
+    borderColor: COLORS.warning,
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    marginBottom: 12,
+  },
+  offlineReadOnlyText: {
+    flex: 1,
+    fontSize: 12,
+    color: COLORS.textLight,
+    fontWeight: '700',
+  },
+
   doctorCard: { backgroundColor: COLORS.white, padding: 16, borderRadius: 20, marginBottom: 12, flexDirection: 'row', alignItems: 'center', borderWidth: 1.5, borderColor: COLORS.border, elevation: 3, shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.08, shadowRadius: 4 },
+  disabledDoctorCard: { opacity: 0.8 },
   avatarContainer: { width: 58, height: 58, borderRadius: 18, backgroundColor: COLORS.secondary, justifyContent: 'center', alignItems: 'center', borderWidth: 1, borderColor: COLORS.border, overflow: 'hidden' },
   doctorInfo: { flex: 1, marginLeft: 14 },
   doctorTopRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
@@ -1385,6 +1460,8 @@ const styles = StyleSheet.create({
   priceText: { fontWeight: '900', color: COLORS.primary, fontSize: 14 },
   doctorActionPill: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 10, paddingVertical: 6, borderRadius: 10, borderWidth: 1, borderColor: COLORS.primary, backgroundColor: COLORS.white },
   doctorActionText: { fontSize: 11, color: COLORS.primary, fontWeight: '900' },
+  disabledActionPill: { borderColor: COLORS.border, backgroundColor: COLORS.secondary },
+  disabledActionText: { color: COLORS.textLight },
 
   appointmentsSection: { marginTop: 30, marginBottom: 20 },
   sectionHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 15 },
@@ -1411,6 +1488,7 @@ const styles = StyleSheet.create({
   viewDetailsButton: { flexDirection: 'row', alignItems: 'center', backgroundColor: COLORS.secondary, paddingHorizontal: 12, paddingVertical: 8, borderRadius: 12, borderWidth: 1, borderColor: COLORS.primary },
   viewDetailsText: { fontSize: 12, color: COLORS.primary, fontWeight: '800', marginRight: 4 },
   payNowButton: { flexDirection: 'row', alignItems: 'center', backgroundColor: COLORS.primary, paddingHorizontal: 16, paddingVertical: 8, borderRadius: 12, gap: 6 },
+  disabledPayNowButton: { backgroundColor: COLORS.border },
   payNowText: { fontSize: 12, color: COLORS.white, fontWeight: '900' },
   statusBadge: { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 12, flexDirection: 'row', alignItems: 'center', gap: 4 },
   pendingPaymentBadge: { backgroundColor: COLORS.pendingPaymentLight, borderWidth: 1, borderColor: COLORS.pendingPayment },
@@ -1623,6 +1701,9 @@ const detailsModalStyles = StyleSheet.create({
     marginBottom: 12,
     gap: 8,
   },
+  payButtonDisabled: {
+    backgroundColor: COLORS.border,
+  },
   payButtonText: {
     color: COLORS.white,
     fontSize: 16,
@@ -1737,6 +1818,9 @@ const paymentStyles = StyleSheet.create({
     borderRadius: 12,
     alignItems: 'center',
     marginTop: 12,
+  },
+  payButtonDisabled: {
+    backgroundColor: PAYMENT_COLORS.border,
   },
   payButtonText: {
     color: PAYMENT_COLORS.buttonText,

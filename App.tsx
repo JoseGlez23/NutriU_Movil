@@ -141,7 +141,7 @@ export default function App() {
 
   return (
     <StripeProvider
-      publishableKey="pk_test_51SHfQCEJmmqziTyLShhDhG4ubMVUdUdPoZhxMw0J5kH1mmUSVs88Cp1xrcEFvnXe1JMHni9KJbJutu8IO9GSvzNJ00Ign5TdVx"
+      publishableKey={process.env.EXPO_PUBLIC_STRIPE_PUBLISHABLE_KEY!}
       urlScheme="nutriu"
     >
       <NetworkProvider>

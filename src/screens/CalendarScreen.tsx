@@ -20,12 +20,104 @@ const COLORS = {
   error: '#FF6B6B'
 };
 
-// Zona horaria Sonora (MST UTC-7 sin horario de verano)
+// Zona horaria San Luis Río Colorado, Sonora
 const TIMEZONE = 'America/Hermosillo';
+const SONORA_TO_UTC_OFFSET_HOURS = 7;
 
-// Horario de la clínica en formato 24h
-const CLINIC_OPEN_HOUR = 7;   // 07:00
-const CLINIC_CLOSE_HOUR = 16; // 16:00 (hasta 15:59 permitido)
+const APPOINTMENT_TIME_SLOTS = [
+  '08:00', '08:30', '09:00', '09:30', '10:00', '10:30',
+  '11:00', '11:30', '12:00', '12:30', '13:00', '13:30',
+  '14:00', '14:30', '15:00', '15:30', '16:00', '16:30', '17:00'
+];
+const BLOCKING_APPOINTMENT_STATES = ['pendiente', 'confirmada'];
+
+const pad2 = (value: number) => String(value).padStart(2, '0');
+
+const parseDbTimestampAsUtc = (value: string) => {
+  const baseValue = String(value || '').trim().replace(' ', 'T');
+  const hasTimezone = /([zZ]|[+\-]\d{2}(?::?\d{2})?)$/.test(baseValue);
+
+  if (hasTimezone) {
+    return new Date(baseValue);
+  }
+
+  const match = baseValue.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?(?:\.(\d{1,3}))?$/);
+  if (!match) {
+    return new Date(`${baseValue}Z`);
+  }
+
+  const [, year, month, day, hour, minute, second = '00', millis = '0'] = match;
+  const milliseconds = Number(millis.padEnd(3, '0'));
+
+  return new Date(Date.UTC(
+    Number(year),
+    Number(month) - 1,
+    Number(day),
+    Number(hour),
+    Number(minute),
+    Number(second),
+    milliseconds,
+  ));
+};
+
+const getSonoraNowParts = () => {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: TIMEZONE,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(new Date());
+
+  const getPart = (type: string) => parts.find((part) => part.type === type)?.value || '00';
+
+  const year = Number(getPart('year'));
+  const month = Number(getPart('month'));
+  const day = Number(getPart('day'));
+  const hour = Number(getPart('hour'));
+  const minute = Number(getPart('minute'));
+
+  return {
+    year,
+    month,
+    day,
+    hour,
+    minute,
+    dateKey: `${year}-${pad2(month)}-${pad2(day)}`,
+  };
+};
+
+const toUtcIsoFromSonoraDateTime = (
+  year: number,
+  monthIndex: number,
+  day: number,
+  hour: number,
+  minute: number,
+  second: number = 0,
+) => {
+  const utcMs = Date.UTC(year, monthIndex, day, hour + SONORA_TO_UTC_OFFSET_HOURS, minute, second);
+  return new Date(utcMs).toISOString();
+};
+
+const getSonoraDateKeyFromISO = (isoDate: string) => {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: TIMEZONE,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(parseDbTimestampAsUtc(isoDate));
+};
+
+const getSonoraHourMinuteFromISO = (isoDate: string) => {
+  return new Intl.DateTimeFormat('en-GB', {
+    timeZone: TIMEZONE,
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).format(parseDbTimestampAsUtc(isoDate));
+};
 
 export default function CalendarScreen({ navigation, route }: any) {
   const { doctorName, doctorId, precio } = route.params || { 
@@ -40,18 +132,22 @@ export default function CalendarScreen({ navigation, route }: any) {
   const [selectedHour24, setSelectedHour24] = useState<string | null>(null); // ej: "13:30"
   const [occupiedDays, setOccupiedDays] = useState<number[]>([]);
   const [occupiedHours24, setOccupiedHours24] = useState<string[]>([]);
-  const [currentMonthIndex, setCurrentMonthIndex] = useState(new Date().getMonth());
-  const [currentYear, setCurrentYear] = useState(new Date().getFullYear());
-  const [availableHours24, setAvailableHours24] = useState<string[]>([]); // ej: ["07:00", "07:30", ..., "15:30"]
+  const sonoraNowAtLoad = getSonoraNowParts();
+  const [currentMonthIndex, setCurrentMonthIndex] = useState(sonoraNowAtLoad.month - 1);
+  const [currentYear, setCurrentYear] = useState(sonoraNowAtLoad.year);
+  const [availableHours24, setAvailableHours24] = useState<string[]>([]); // ej: ["08:00", "08:30", ..., "17:00"]
 
   const months = ['Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'];
   const daysOfWeek = ['Dom', 'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb'];
 
-  const today = new Date();
-  const currentDay = today.getDate();
-  const currentMonthNum = today.getMonth();
-  const currentYearNum = today.getFullYear();
+  const sonoraNow = getSonoraNowParts();
+  const currentDay = sonoraNow.day;
+  const currentMonthNum = sonoraNow.month - 1;
+  const currentYearNum = sonoraNow.year;
+  const todayKey = sonoraNow.dateKey;
   const maxScheduleDate = new Date(currentYearNum + 1, currentMonthNum, currentDay);
+  const maxMonthDate = new Date(maxScheduleDate.getFullYear(), maxScheduleDate.getMonth(), 1);
+  const minMonthDate = new Date(currentYearNum, currentMonthNum, 1);
 
   const currentMonth = {
     month: months[currentMonthIndex],
@@ -67,28 +163,18 @@ export default function CalendarScreen({ navigation, route }: any) {
       return;
     }
 
-    const selectedFullDate = new Date(currentYear, currentMonthIndex, parseInt(selectedDate));
-    const now = new Date();
-    const isToday = selectedFullDate.toDateString() === now.toDateString();
+    const nowInSonora = getSonoraNowParts();
+    const selectedDateKey = `${currentYear}-${pad2(currentMonthIndex + 1)}-${pad2(Number(selectedDate))}`;
+    const isTodayInSonora = selectedDateKey === nowInSonora.dateKey;
 
-    const hoursList: string[] = [];
+    const hoursList = APPOINTMENT_TIME_SLOTS.filter((slot) => {
+      if (!isTodayInSonora) return true;
 
-    for (let h = CLINIC_OPEN_HOUR; h < CLINIC_CLOSE_HOUR; h++) {
-      for (let m = 0; m < 60; m += 30) {
-        const hourDate = new Date(selectedFullDate);
-        hourDate.setHours(h, m, 0, 0);
-
-        if (isToday && hourDate <= now) continue;
-
-        const hourStr = hourDate.toLocaleTimeString('es-MX', {
-          hour: '2-digit',
-          minute: '2-digit',
-          hour12: false,
-        });
-
-        hoursList.push(hourStr);
-      }
-    }
+      const [slotHour, slotMinute] = slot.split(':').map(Number);
+      const nowMinutes = nowInSonora.hour * 60 + nowInSonora.minute;
+      const slotMinutes = slotHour * 60 + slotMinute;
+      return slotMinutes > nowMinutes;
+    });
 
     setAvailableHours24(hoursList);
   }, [selectedDate, currentMonthIndex, currentYear]);
@@ -98,16 +184,46 @@ export default function CalendarScreen({ navigation, route }: any) {
       if (!doctorId) return;
 
       try {
+        const monthStartUtcIso = toUtcIsoFromSonoraDateTime(currentYear, currentMonthIndex, 1, 0, 0, 0);
+        const monthEndUtcIso = toUtcIsoFromSonoraDateTime(
+          currentYear,
+          currentMonthIndex,
+          new Date(currentYear, currentMonthIndex + 1, 0).getDate(),
+          23,
+          59,
+          59,
+        );
+
         const { data, error } = await supabase
           .from('citas')
-          .select('fecha_hora')
+          .select('fecha_hora, estado')
           .eq('id_nutriologo', doctorId)
-          .eq('estado', 'confirmada');
+          .in('estado', BLOCKING_APPOINTMENT_STATES)
+          .gte('fecha_hora', monthStartUtcIso)
+          .lte('fecha_hora', monthEndUtcIso);
 
         if (error) throw error;
 
-        const occupied = data?.map(cita => new Date(cita.fecha_hora).getDate()) || [];
-        setOccupiedDays([...new Set(occupied)]);
+        const occupiedByDate = new Map<string, Set<string>>();
+
+        (data || []).forEach((cita) => {
+          const dateKey = getSonoraDateKeyFromISO(cita.fecha_hora);
+          const hourMinute = getSonoraHourMinuteFromISO(cita.fecha_hora);
+
+          if (!APPOINTMENT_TIME_SLOTS.includes(hourMinute)) return;
+
+          if (!occupiedByDate.has(dateKey)) {
+            occupiedByDate.set(dateKey, new Set<string>());
+          }
+
+          occupiedByDate.get(dateKey)!.add(hourMinute);
+        });
+
+        const fullOccupiedDays = Array.from(occupiedByDate.entries())
+          .filter(([, hours]) => hours.size >= APPOINTMENT_TIME_SLOTS.length)
+          .map(([dateKey]) => Number(dateKey.split('-')[2]));
+
+        setOccupiedDays(fullOccupiedDays);
       } catch (err) {
         console.error('Error al cargar días ocupados:', err);
       }
@@ -120,29 +236,24 @@ export default function CalendarScreen({ navigation, route }: any) {
     const fetchOccupiedHours = async () => {
       if (!selectedDate || !doctorId) return;
 
-      const selectedFullDate = new Date(currentYear, currentMonthIndex, parseInt(selectedDate));
-      const startOfDay = selectedFullDate.toISOString().split('T')[0] + 'T00:00:00';
-      const endOfDay = selectedFullDate.toISOString().split('T')[0] + 'T23:59:59';
+      const selectedDay = Number(selectedDate);
+      const startOfDay = toUtcIsoFromSonoraDateTime(currentYear, currentMonthIndex, selectedDay, 0, 0, 0);
+      const endOfDay = toUtcIsoFromSonoraDateTime(currentYear, currentMonthIndex, selectedDay, 23, 59, 59);
 
       try {
         const { data, error } = await supabase
           .from('citas')
-          .select('fecha_hora')
+          .select('fecha_hora, estado')
           .eq('id_nutriologo', doctorId)
           .gte('fecha_hora', startOfDay)
           .lte('fecha_hora', endOfDay)
-          .eq('estado', 'confirmada');
+          .in('estado', BLOCKING_APPOINTMENT_STATES);
 
         if (error) throw error;
 
         const occupied = data?.map(cita => {
-          const date = new Date(cita.fecha_hora);
-          return date.toLocaleTimeString('es-MX', {
-            hour: '2-digit',
-            minute: '2-digit',
-            hour12: false,
-          });
-        }) || [];
+          return getSonoraHourMinuteFromISO(cita.fecha_hora);
+        }).filter((hourMinute) => APPOINTMENT_TIME_SLOTS.includes(hourMinute)) || [];
         setOccupiedHours24([...new Set(occupied)]);
       } catch (err) {
         console.error('Error al cargar horas ocupadas:', err);
@@ -151,6 +262,12 @@ export default function CalendarScreen({ navigation, route }: any) {
 
     fetchOccupiedHours();
   }, [selectedDate, doctorId, currentMonthIndex, currentYear]);
+
+  useEffect(() => {
+    if (selectedHour24 && occupiedHours24.includes(selectedHour24)) {
+      setSelectedHour24(null);
+    }
+  }, [occupiedHours24, selectedHour24]);
 
   const generateCalendarDays = () => {
     const days = [];
@@ -164,6 +281,11 @@ export default function CalendarScreen({ navigation, route }: any) {
   };
 
   const handlePrevMonth = () => {
+    const prevMonthDate = new Date(currentYear, currentMonthIndex - 1, 1);
+    if (prevMonthDate < minMonthDate) {
+      return;
+    }
+
     if (currentMonthIndex === 0) {
       setCurrentMonthIndex(11);
       setCurrentYear(currentYear - 1);
@@ -176,7 +298,6 @@ export default function CalendarScreen({ navigation, route }: any) {
 
   const handleNextMonth = () => {
     const nextMonthDate = new Date(currentYear, currentMonthIndex + 1, 1);
-    const maxMonthDate = new Date(maxScheduleDate.getFullYear(), maxScheduleDate.getMonth(), 1);
     if (nextMonthDate > maxMonthDate) {
       return;
     }
@@ -197,15 +318,15 @@ export default function CalendarScreen({ navigation, route }: any) {
   };
 
   const handleDayPress = (day: number) => {
-    const selectedFullDate = new Date(currentYear, currentMonthIndex, day);
-    const todayDate = new Date(currentYearNum, currentMonthNum, currentDay);
+    const selectedDateKey = `${currentYear}-${pad2(currentMonthIndex + 1)}-${pad2(day)}`;
+    const maxDateKey = `${maxScheduleDate.getFullYear()}-${pad2(maxScheduleDate.getMonth() + 1)}-${pad2(maxScheduleDate.getDate())}`;
 
-    if (selectedFullDate > maxScheduleDate) {
+    if (selectedDateKey > maxDateKey) {
       Alert.alert('Atención', 'Solo puedes agendar citas hasta 1 año a partir de hoy.');
       return;
     }
 
-    if (selectedFullDate < todayDate) {
+    if (selectedDateKey < todayKey) {
       Alert.alert('Atención', 'No puedes agendar citas en fechas pasadas.');
       return;
     }
@@ -219,14 +340,6 @@ export default function CalendarScreen({ navigation, route }: any) {
       setSelectedDate(day.toString());
       setSelectedHour24(null);
     }
-  };
-
-  const handleHourPress = (hour24: string) => {
-    if (occupiedHours24.includes(hour24)) {
-      Alert.alert('Hora no disponible', 'Esta hora ya está ocupada por otro paciente.');
-      return;
-    }
-    setSelectedHour24(hour24);
   };
 
   const scheduleAppointment = () => {
@@ -254,19 +367,14 @@ export default function CalendarScreen({ navigation, route }: any) {
       console.log('Hora seleccionada (24h):', selectedHour24);
       console.log('Hora:', hour24, 'Minutos:', minute);
 
-      // Validación de horario - comparación directa
-      const openHour = CLINIC_OPEN_HOUR;
-      const closeHour = CLINIC_CLOSE_HOUR;
-
       // Bloqueo de horas pasadas si es hoy
-      const now = new Date();
-      const isToday = selectedDate === now.getDate().toString() && 
-                      currentMonthIndex === now.getMonth() && 
-                      currentYear === now.getFullYear();
+      const nowInSonora = getSonoraNowParts();
+      const selectedDateKey = `${currentYear}-${pad2(currentMonthIndex + 1)}-${pad2(Number(selectedDate))}`;
+      const isToday = selectedDateKey === nowInSonora.dateKey;
 
       if (isToday) {
-        const currentHour = now.getHours();
-        const currentMinute = now.getMinutes();
+        const currentHour = nowInSonora.hour;
+        const currentMinute = nowInSonora.minute;
         if (hour24 < currentHour || 
             (hour24 === currentHour && minute <= currentMinute)) {
           Alert.alert('Hora no válida', 'No puedes agendar en una hora que ya pasó o es la actual.');
@@ -274,48 +382,93 @@ export default function CalendarScreen({ navigation, route }: any) {
         }
       }
 
-      // Bloqueo fuera de horario (permite hasta 15:59)
-      if (hour24 < openHour || hour24 > closeHour || 
-          (hour24 === closeHour && minute > 0)) {
-        Alert.alert('Horario fuera de servicio', 'La clínica atiende de 7:00 a 16:00.');
+      // Bloqueo de horario no permitido
+      if (!APPOINTMENT_TIME_SLOTS.includes(selectedHour24!)) {
+        Alert.alert('Horario fuera de servicio', 'La clínica atiende de 08:00 a 17:00.');
         return;
       }
 
-      // Crear fecha local
-      const fechaHoraLocal = new Date(currentYear, currentMonthIndex, parseInt(selectedDate!), hour24, minute);
+      // Bloqueo por hora ocupada
+      if (occupiedHours24.includes(selectedHour24!)) {
+        setSelectedHour24(null);
+        return;
+      }
 
-      if (fechaHoraLocal > maxScheduleDate) {
+      const selectedDateObj = new Date(currentYear, currentMonthIndex, parseInt(selectedDate!, 10));
+      if (selectedDateObj > maxScheduleDate) {
         Alert.alert('Fecha fuera de rango', 'Solo puedes agendar citas hasta 1 año a partir de hoy.');
         return;
       }
 
-      // Formato ISO manual
-      const year = fechaHoraLocal.getFullYear();
-      const month = String(fechaHoraLocal.getMonth() + 1).padStart(2, '0');
-      const day = String(fechaHoraLocal.getDate()).padStart(2, '0');
-      const hours = String(fechaHoraLocal.getHours()).padStart(2, '0');
-      const minutes = String(fechaHoraLocal.getMinutes()).padStart(2, '0');
+      const fechaHoraISO = toUtcIsoFromSonoraDateTime(
+        currentYear,
+        currentMonthIndex,
+        parseInt(selectedDate!, 10),
+        hour24,
+        minute,
+        0,
+      );
 
-      const fechaHoraISO = `${year}-${month}-${day}T${hours}:${minutes}:00`;
 
-      console.log('Enviando fecha a Supabase:', fechaHoraISO);
+      const slotEndISO = new Date(new Date(fechaHoraISO).getTime() + 30 * 60 * 1000).toISOString();
 
-      // Crear cita
-      const { data: citaResult, error } = await supabase.rpc('crear_cita_pendiente', {
-        p_id_paciente: patientData.id_paciente,
-        p_id_nutriologo: doctorId,
-        p_fecha_hora: fechaHoraISO,
-        p_tipo_cita: 'presencial',
-        p_motivo: 'Consulta inicial',
-      });
+      const { data: existingAppointments, error: existingAppointmentsError } = await supabase
+        .from('citas')
+        .select('id_cita, fecha_hora, estado')
+        .eq('id_nutriologo', doctorId)
+        .in('estado', BLOCKING_APPOINTMENT_STATES)
+        .gte('fecha_hora', fechaHoraISO)
+        .lt('fecha_hora', slotEndISO)
+        .limit(1);
 
-      if (error || !citaResult) {
-        console.error('Error creando cita con RPC:', error);
+      if (existingAppointmentsError) {
+        throw existingAppointmentsError;
+      }
+
+      if ((existingAppointments || []).length > 0) {
+        setSelectedHour24(null);
+        await (async () => {
+          const selectedDay = Number(selectedDate);
+          const startOfDay = toUtcIsoFromSonoraDateTime(currentYear, currentMonthIndex, selectedDay, 0, 0, 0);
+          const endOfDay = toUtcIsoFromSonoraDateTime(currentYear, currentMonthIndex, selectedDay, 23, 59, 59);
+
+          const { data } = await supabase
+            .from('citas')
+            .select('fecha_hora, estado')
+            .eq('id_nutriologo', doctorId)
+            .gte('fecha_hora', startOfDay)
+            .lte('fecha_hora', endOfDay)
+            .in('estado', BLOCKING_APPOINTMENT_STATES);
+
+          const occupied = data?.map(cita => getSonoraHourMinuteFromISO(cita.fecha_hora)).filter((hourMinute) => APPOINTMENT_TIME_SLOTS.includes(hourMinute)) || [];
+          setOccupiedHours24([...new Set(occupied)]);
+        })();
+        return;
+      }
+
+      console.log('Enviando fecha a Supabase (UTC):', fechaHoraISO);
+
+      const { data: citaInsertada, error } = await supabase
+        .from('citas')
+        .insert({
+          id_paciente: patientData.id_paciente,
+          id_nutriologo: doctorId,
+          fecha_hora: fechaHoraISO,
+          estado: 'pendiente',
+          duracion_minutos: 60,
+          tipo_cita: 'presencial',
+          motivo_consulta: 'Consulta inicial',
+        })
+        .select('id_cita')
+        .single();
+
+      if (error || !citaInsertada?.id_cita) {
+        console.error('Error creando cita:', error);
         Alert.alert('Error', 'No se pudo reservar la cita. Intenta nuevamente.');
         return;
       }
 
-      const citaId = citaResult;
+      const citaId = citaInsertada.id_cita;
 
       // Navegar a pago sin alerta
       navigation.navigate('Schedule', {
@@ -354,8 +507,16 @@ export default function CalendarScreen({ navigation, route }: any) {
 
         <View style={styles.calendarCard}>
           <View style={styles.monthHeader}>
-            <TouchableOpacity onPress={handlePrevMonth} style={styles.navButton}>
-              <Ionicons name="chevron-back" size={24} color={COLORS.primary} />
+            <TouchableOpacity
+              onPress={handlePrevMonth}
+              style={styles.navButton}
+              disabled={new Date(currentYear, currentMonthIndex - 1, 1) < minMonthDate}
+            >
+              <Ionicons
+                name="chevron-back"
+                size={24}
+                color={new Date(currentYear, currentMonthIndex - 1, 1) < minMonthDate ? COLORS.textLight : COLORS.primary}
+              />
             </TouchableOpacity>
             <Text style={styles.monthTitle}>{currentMonth.month} {currentMonth.year}</Text>
             <TouchableOpacity
@@ -424,7 +585,7 @@ export default function CalendarScreen({ navigation, route }: any) {
 
         {selectedDate && (
           <View style={styles.hourPickerContainer}>
-            <Text style={styles.hourTitle}>Horarios disponibles (24h)</Text>
+            <Text style={styles.hourTitle}>Horarios disponibles (08:00 a 17:00)</Text>
             
             {availableHours24.length > 0 ? (
               <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.hourScroll}>
@@ -438,7 +599,7 @@ export default function CalendarScreen({ navigation, route }: any) {
                         selectedHour24 === hour24 && styles.selectedHourButton,
                         isOccupied && styles.occupiedHourButton
                       ]}
-                      onPress={() => !isOccupied && setSelectedHour24(hour24)}
+                      onPress={() => setSelectedHour24(hour24)}
                       disabled={isOccupied}
                     >
                       <Text style={[

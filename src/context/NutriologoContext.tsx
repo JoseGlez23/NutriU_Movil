@@ -3,6 +3,7 @@ import { supabase } from '../lib/supabase';
 import { useAuth } from './AuthContext';
 import NetInfo from '@react-native-community/netinfo';
 import { useNetwork } from '../utils/NetworkHandler';
+import { patientPlanService } from '../services/patientPlanService';
 
 // Tipos de datos
 export interface Nutriologo {
@@ -226,6 +227,11 @@ export const NutriologoProvider: React.FC<NutriologoProviderProps> = ({ children
       }
 
       console.log('📝 Solicitando nutriólogo:', id_nutriologo);
+
+      const { success: plansCleared, error: clearPlansError } = await patientPlanService.clearActivePlans(idPaciente);
+      if (!plansCleared) {
+        throw new Error(clearPlansError || 'No se pudieron limpiar dieta y rutina activas');
+      }
 
       // Primero, desactivar cualquier relación anterior
       await supabase
