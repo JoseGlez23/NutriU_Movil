@@ -1,0 +1,33 @@
+{
+  "expo": {
+    "name": "NutriU",
+    "slug": "NutriU",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon2.png",
+    "userInterfaceStyle": "light",
+    "newArchEnabled": true,
+    "scheme": "nutriu",  // ← ¡ESTO ES LO QUE FALTABA! nutriu://
+    "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#ffffff"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.tunombre.nutriu"  // cámbialo si no lo tienes
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#ffffff"
+      },
+      "package": "com.tunombre.nutriu",  // cámbialo si no lo tienes
+      "edgeToEdgeEnabled": true,
+      "predictiveBackGestureEnabled": false
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    }
+  }
+}
