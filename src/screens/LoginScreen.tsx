@@ -116,7 +116,6 @@ export default function LoginScreen({ navigation }: any) {
   const [isLogin, setIsLogin] = useState(true);
   const [loading, setLoading] = useState(false);
   const [recoveryLoading, setRecoveryLoading] = useState(false);
-  const [recoveryMessage, setRecoveryMessage] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [modalVisible, setModalVisible] = useState({ show: false, title: '', message: '' });
   const [selectedGender, setSelectedGender] = useState<string>('');
@@ -264,25 +263,29 @@ export default function LoginScreen({ navigation }: any) {
     }
 
     setRecoveryLoading(true);
-    setRecoveryMessage('');
 
     try {
       const result = await resetPassword(email);
 
       if (result.success) {
-        setRecoveryMessage('¡Enlace enviado! Revisa tu correo (incluye spam).');
         Alert.alert(
           'Enlace enviado',
           'Te hemos enviado un enlace para restablecer tu contraseña. Revisa tu correo (incluyendo spam).',
           [{ text: 'OK' }]
         );
       } else {
-        setRecoveryMessage(result.error || 'No pudimos enviar el enlace.');
-        showAlert('Error', result.error || 'No pudimos enviar el enlace. Intenta de nuevo.');
+        // Si es error de rate limit, solo mostrar alerta sin mensaje en pantalla
+        if (result.error && (result.error.includes('límite temporal') || result.error.includes('excedido'))) {
+          Alert.alert(
+            'Atención',
+            result.error,
+            [{ text: 'Entendido', style: 'default' }]
+          );
+        } else {
+          showAlert('Error', result.error || 'No pudimos enviar el enlace. Intenta de nuevo.');
+        }
       }
-    } catch (err: any) {
-      console.error('Error en recuperación:', err);
-      setRecoveryMessage('Error inesperado. Intenta más tarde.');
+    } catch (_err: any) {
       showAlert('Error', 'Ocurrió un error inesperado al enviar el enlace.');
     } finally {
       setRecoveryLoading(false);
@@ -395,17 +398,6 @@ export default function LoginScreen({ navigation }: any) {
                     <Text style={styles.forgotText}>¿Olvidaste tu contraseña?</Text>
                   )}
                 </TouchableOpacity>
-
-                {recoveryMessage ? (
-                  <Text style={[
-                    styles.recoveryMessage,
-                    recoveryMessage.includes('Error') || recoveryMessage.includes('No pudimos') 
-                      ? { color: COLORS.error } 
-                      : { color: COLORS.success }
-                  ]}>
-                    {recoveryMessage}
-                  </Text>
-                ) : null}
               </View>
             )}
 
@@ -576,12 +568,6 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '600',
     textDecorationLine: 'underline',
-  },
-  recoveryMessage: {
-    marginTop: 12,
-    fontSize: 14,
-    textAlign: 'center',
-    fontWeight: '600',
   },
   mainBtn: { backgroundColor: COLORS.primary, paddingVertical: 16, borderRadius: 12, alignItems: 'center', elevation: 4 },
   mainBtnText: { color: COLORS.white, fontWeight: 'bold', fontSize: 14, letterSpacing: 1 },

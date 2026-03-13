@@ -7,27 +7,61 @@
     "icon": "./assets/icon2.png",
     "userInterfaceStyle": "light",
     "newArchEnabled": true,
-    "scheme": "nutriu",  // ← ¡ESTO ES LO QUE FALTABA! nutriu://
+    "scheme": "nutriu",
     "splash": {
       "image": "./assets/splash-icon.png",
       "resizeMode": "contain",
       "backgroundColor": "#ffffff"
     },
+    "notification": {
+      "icon": "./assets/icon2.png",
+      "color": "#FF6B6B",
+      "androidMode": "default",
+      "androidCollapsedTitle": "NutriU"
+    },
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.tunombre.nutriu"  // cámbialo si no lo tienes
+      "bundleIdentifier": "com.tunombre.nutriu"
     },
     "android": {
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#ffffff"
       },
-      "package": "com.tunombre.nutriu",  // cámbialo si no lo tienes
+      "package": "com.tunombre.nutriu",
       "edgeToEdgeEnabled": true,
-      "predictiveBackGestureEnabled": false
+      "predictiveBackGestureEnabled": false,
+      "permissions": [
+        "NOTIFICATIONS",
+        "RECEIVE_BOOT_COMPLETED"
+      ]
     },
     "web": {
       "favicon": "./assets/favicon.png"
-    }
+    },
+    "plugins": [
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/icon2.png",
+          "color": "#FF6B6B",
+          "sounds": []
+        }
+      ],
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "usesCleartextTraffic": true
+          }
+        }
+      ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "0f9f6edb-a387-4eca-a8c7-942271397187"
+      }
+    },
+    "owner": "matita23"
   }
 }

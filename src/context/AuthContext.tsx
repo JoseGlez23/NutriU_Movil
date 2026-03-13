@@ -1,6 +1,9 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import { Session, User } from '@supabase/supabase-js';
+import * as Linking from 'expo-linking';
+import Constants from 'expo-constants';
 import { supabase } from '../lib/supabase';
+import { registerForPushNotifications, unregisterPushToken } from '../services/notificationService';
 
 interface AuthContextType {
   session: Session | null;
@@ -38,24 +41,73 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [session, setSession] = useState<Session | null>(null);
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
+  const [pushToken, setPushToken] = useState<string | null>(null);
 
   useEffect(() => {
     // Verificar sesión existente
-    supabase.auth.getSession().then(({ data: { session } }) => {
+    supabase.auth.getSession().then(async ({ data: { session } }) => {
       setSession(session);
       setUser(session?.user ?? null);
+
       setLoading(false);
+
+      // No bloquear el arranque por registro de notificaciones push.
+      if (session?.user) {
+        void registerPushNotificationsForUser(session.user);
+      }
     });
 
     // Escuchar cambios en la autenticación
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (_event, session) => {
       setSession(session);
       setUser(session?.user ?? null);
+
       setLoading(false);
+
+      if (session?.user) {
+        void registerPushNotificationsForUser(session.user);
+      }
     });
 
     return () => subscription.unsubscribe();
   }, []);
+
+  // Función auxiliar para registrar notificaciones push
+  const registerPushNotificationsForUser = async (authUser: User) => {
+    try {
+      // Priorizar id_auth_user para evitar fallas si el correo difiere por mayusculas/edicion.
+      const { data: pacienteByAuth } = await supabase
+        .from('pacientes')
+        .select('id_paciente')
+        .eq('id_auth_user', authUser.id)
+        .maybeSingle();
+
+      let pacienteId: number | null = pacienteByAuth?.id_paciente ?? null;
+
+      if (!pacienteId && authUser.email) {
+        const { data: pacienteByEmail } = await supabase
+          .from('pacientes')
+          .select('id_paciente')
+          .eq('correo', authUser.email.toLowerCase())
+          .maybeSingle();
+
+        pacienteId = pacienteByEmail?.id_paciente ?? null;
+      }
+
+      if (!pacienteId) {
+        console.warn('[AUTH] No se encontro paciente para registrar push token');
+        return;
+      }
+
+      const token = await registerForPushNotifications(pacienteId);
+      if (token) {
+        setPushToken(token);
+        console.log('[AUTH] Notificaciones push registradas exitosamente');
+      }
+    } catch (error) {
+      console.error('[AUTH] Error registrando notificaciones push:', error);
+    }
+  };
 
   const signIn = async (email: string, password: string) => {
     try {
@@ -89,12 +141,20 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         return { success: false, error: errorMessage };
       }
 
-      // Verificar que el usuario sea un paciente
-      const { data: pacienteData } = await supabase
+      // Verificar que el usuario sea un paciente usando id_auth_user (mas robusto que correo)
+      const { data: pacienteData, error: pacienteError } = await supabase
         .from('pacientes')
         .select('id_paciente')
-        .eq('correo', email.trim().toLowerCase())
+        .eq('id_auth_user', data.user.id)
         .maybeSingle();
+
+      if (pacienteError) {
+        console.error('[AUTH] Error validando perfil de paciente:', pacienteError);
+        return {
+          success: false,
+          error: 'No se pudo validar tu perfil en este momento. Verifica tu conexion e intenta de nuevo.'
+        };
+      }
 
       if (!pacienteData) {
         // Si no es paciente, cerrar sesión y mostrar error
@@ -302,7 +362,21 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const signOut = async () => {
     try {
+      // Desregistrar token de notificaciones si existe
+      if (pushToken && user?.email) {
+        const { data: pacienteData } = await supabase
+          .from('pacientes')
+          .select('id_paciente')
+          .eq('correo', user.email.toLowerCase())
+          .maybeSingle();
+
+        if (pacienteData?.id_paciente) {
+          await unregisterPushToken(pacienteData.id_paciente, pushToken);
+        }
+      }
+
       await supabase.auth.signOut();
+      setPushToken(null);
     } catch (error) {
       console.error('Error al cerrar sesión:', error);
       throw error;
@@ -332,17 +406,17 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         };
       }
 
-      const { error } = await supabase.auth.resetPasswordForEmail(
-        email.trim().toLowerCase(), 
-        {
-          redirectTo: 'nutriu://reset-password',
-        }
-      );
+      const isExpoGo = Constants.appOwnership === 'expo';
+      const redirectTo = isExpoGo
+        ? Linking.createURL('reset-password')
+        : 'nutriu://reset-password';
+
+      const { error } = await supabase.auth.resetPasswordForEmail(email.trim().toLowerCase(), {
+        redirectTo,
+      });
 
       if (error) {
-        console.error('Error de Supabase Auth al resetear password:', error);
-
-        // Manejo específico del rate limit
+        // Manejo específico del rate limit (sin mostrar error técnico al usuario)
         if (error.message.includes('rate limit') || error.message.includes('exceeded')) {
           return {
             success: false,
@@ -359,7 +433,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       
       return { success: true };
     } catch (error: any) {
-      console.error('Error al restablecer contraseña:', error);
       return { 
         success: false, 
         error: 'Error inesperado. Por favor intenta nuevamente.' 

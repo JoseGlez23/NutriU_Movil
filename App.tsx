@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { NavigationContainer } from '@react-navigation/native';
 import { createStackNavigator } from '@react-navigation/stack';
 import { View, ActivityIndicator, SafeAreaView } from 'react-native';
@@ -28,8 +28,8 @@ import ResetPasswordScreen from './src/screens/ResetPasswordScreen';
 
 const Stack = createStackNavigator();
 
-// Navigator - recibe el ref como prop
-const AppNavigator = ({ navigationRef }: { navigationRef: any }) => {
+// Navigator - recibe el ref y setNavigatorReady como props
+const AppNavigator = ({ navigationRef, setNavigatorReady }: { navigationRef: any; setNavigatorReady: (ready: boolean) => void }) => {
   const { session, loading } = useAuth();
 
   if (loading) {
@@ -41,7 +41,13 @@ const AppNavigator = ({ navigationRef }: { navigationRef: any }) => {
   }
 
   return (
-    <NavigationContainer ref={navigationRef}>
+    <NavigationContainer 
+      ref={navigationRef}
+      onReady={() => {
+        console.log('Navigator listo');
+        setNavigatorReady(true);
+      }}
+    >
       <Stack.Navigator screenOptions={{ headerShown: false }}>
         {session ? (
           <>
@@ -55,11 +61,13 @@ const AppNavigator = ({ navigationRef }: { navigationRef: any }) => {
             <Stack.Screen name="FoodTracking" component={FoodTrackingScreen} />
             <Stack.Screen name="Profile" component={ProfileScreen} />
             <Stack.Screen name="PhotoSelection" component={PhotoSelectionScreen} />
-            <Stack.Screen name="ResetPassword" component={ResetPasswordScreen} />
           </>
         ) : (
-          <Stack.Screen name="Login" component={LoginScreen} />
+          <>
+            <Stack.Screen name="Login" component={LoginScreen} />
+          </>
         )}
+        <Stack.Screen name="ResetPassword" component={ResetPasswordScreen} />
       </Stack.Navigator>
     </NavigationContainer>
   );
@@ -68,42 +76,60 @@ const AppNavigator = ({ navigationRef }: { navigationRef: any }) => {
 export default function App() {
   // Referencia al navigator para deep links
   const navigationRef = useRef<any>(null);
+  const [isNavigatorReady, setNavigatorReady] = useState(false);
+  const pendingUrlRef = useRef<string | null>(null);
+  const isNavigatorReadyRef = useRef(false);
+
+  // Actualizar ref cuando cambie el estado
+  useEffect(() => {
+    isNavigatorReadyRef.current = isNavigatorReady;
+  }, [isNavigatorReady]);
 
   // Manejo de deep links global
   useEffect(() => {
-    const handleUrl = ({ url }: { url: string }) => {
-      console.log('Deep link recibido:', url);
-      
-      // Extraer el token manualmente si es necesario
-      let token = null;
-      let type = null;
-      
-      if (url.includes('token=')) {
-        const tokenMatch = url.match(/token=([^&]+)/);
-        token = tokenMatch ? tokenMatch[1] : null;
-      }
-      
-      if (url.includes('type=')) {
-        const typeMatch = url.match(/type=([^&]+)/);
-        type = typeMatch ? typeMatch[1] : null;
-      }
-
-      // También intentar con Linking.parse
+    const parseRecoveryParams = (url: string) => {
       const parsed = Linking.parse(url);
-      console.log('Parsed:', parsed);
+      const queryParams = (parsed.queryParams ?? {}) as Record<string, string | undefined>;
 
-      if (parsed.path === 'reset-password' || url.includes('reset-password')) {
-        // Esperar un poco a que el navigator esté listo
-        setTimeout(() => {
-          if (navigationRef.current) {
-            navigationRef.current.navigate('ResetPassword', { 
-              token: token || parsed.queryParams?.token,
-              type: type || parsed.queryParams?.type 
-            });
-          } else {
-            console.warn('Navigation ref no disponible aún');
-          }
-        }, 500);
+      let hashParams: Record<string, string> = {};
+      const hashIndex = url.indexOf('#');
+      if (hashIndex >= 0) {
+        hashParams = Object.fromEntries(new URLSearchParams(url.slice(hashIndex + 1)).entries());
+      }
+
+      return {
+        ...queryParams,
+        ...hashParams,
+      } as Record<string, string | undefined>;
+    };
+
+    const isRecoveryLink = (url: string) => {
+      const params = parseRecoveryParams(url);
+      const hasCredentials = Boolean(
+        params.code ||
+          params.token_hash ||
+          (params.access_token && params.refresh_token)
+      );
+
+      return Boolean(
+        url.includes('reset-password') ||
+          params.type === 'recovery' ||
+          hasCredentials
+      );
+    };
+
+    const handleUrl = ({ url }: { url: string }) => {
+      // Para reset-password, navegar directamente con el URL completo
+      if (isRecoveryLink(url)) {
+
+        // Si el navigator no está listo, guardar para después
+        if (!isNavigatorReadyRef.current || !navigationRef.current) {
+          pendingUrlRef.current = url;
+          return;
+        }
+
+        navigationRef.current.navigate('ResetPassword', { resetUrl: url });
+        return;
       }
     };
 
@@ -116,7 +142,21 @@ export default function App() {
     const subscription = Linking.addEventListener('url', handleUrl);
 
     return () => subscription.remove();
-  }, []);
+  }, []); // Sin dependencias - solo se ejecuta una vez
+
+  // Cuando el navigator esté listo, procesar URL pendiente
+  useEffect(() => {
+    if (isNavigatorReady && pendingUrlRef.current && navigationRef.current) {
+      const url = pendingUrlRef.current;
+      pendingUrlRef.current = null;
+      
+      if (url) {
+        setTimeout(() => {
+          navigationRef.current?.navigate('ResetPassword', { resetUrl: url });
+        }, 100);
+      }
+    }
+  }, [isNavigatorReady]);
 
   // Manejo del botón de retroceso
   useEffect(() => {
@@ -151,7 +191,7 @@ export default function App() {
               <PointsProvider>
                 <ProfileImageProvider>
                   <SafeAreaView style={{ flex: 1 }}>
-                    <AppNavigator navigationRef={navigationRef} />
+                    <AppNavigator navigationRef={navigationRef} setNavigatorReady={setNavigatorReady} />
                   </SafeAreaView>
                 </ProfileImageProvider>
               </PointsProvider>

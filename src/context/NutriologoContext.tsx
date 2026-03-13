@@ -4,6 +4,9 @@ import { useAuth } from './AuthContext';
 import NetInfo from '@react-native-community/netinfo';
 import { useNetwork } from '../utils/NetworkHandler';
 import { patientPlanService } from '../services/patientPlanService';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+
+const NUTRIOLOGO_CACHE_TTL = 5 * 60 * 1000;
 
 // Tipos de datos
 export interface Nutriologo {
@@ -63,6 +66,34 @@ export const NutriologoProvider: React.FC<NutriologoProviderProps> = ({ children
   const [tieneDietaAsignada, setTieneDietaAsignada] = useState<boolean>(false);
   const [idPaciente, setIdPaciente] = useState<number | null>(null);
 
+  const getNutriologoCacheKey = (pacienteId: number) => `nutriologo_state_${pacienteId}`;
+
+  const getCachedNutriologoState = async (pacienteId: number) => {
+    try {
+      const raw = await AsyncStorage.getItem(getNutriologoCacheKey(pacienteId));
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      if (Date.now() - parsed.timestamp > NUTRIOLOGO_CACHE_TTL) {
+        await AsyncStorage.removeItem(getNutriologoCacheKey(pacienteId));
+        return null;
+      }
+      return parsed.data;
+    } catch {
+      return null;
+    }
+  };
+
+  const setCachedNutriologoState = async (pacienteId: number, value: any) => {
+    try {
+      await AsyncStorage.setItem(
+        getNutriologoCacheKey(pacienteId),
+        JSON.stringify({ data: value, timestamp: Date.now() }),
+      );
+    } catch {
+      // noop
+    }
+  };
+
   // Obtener ID del paciente desde la BD usando el email del auth user
   const obtenerIdPaciente = async (email: string) => {
     try {
@@ -121,7 +152,15 @@ export const NutriologoProvider: React.FC<NutriologoProviderProps> = ({ children
 
   const verificarNutriologoAsignado = async (pacienteId: number): Promise<void> => {
     try {
-      setLoading(true);
+      const cachedState = await getCachedNutriologoState(pacienteId);
+      if (cachedState) {
+        setNutriologo(cachedState.nutriologo);
+        setTieneDietaAsignada(Boolean(cachedState.tieneDietaAsignada));
+        setEstadoNutriologo(cachedState.estadoNutriologo);
+        setLoading(false);
+      } else {
+        setLoading(true);
+      }
       console.log('🔍 Verificando nutriólogo para paciente ID:', pacienteId);
 
       // PASO 1: Verificar si tiene nutriólogo asignado (relación activa)
@@ -156,6 +195,11 @@ export const NutriologoProvider: React.FC<NutriologoProviderProps> = ({ children
         setNutriologo(null);
         setTieneDietaAsignada(false);
         setEstadoNutriologo('sin_asignar');
+        await setCachedNutriologoState(pacienteId, {
+          nutriologo: null,
+          tieneDietaAsignada: false,
+          estadoNutriologo: 'sin_asignar',
+        });
         setLoading(false);
         return;
       }
@@ -204,6 +248,22 @@ export const NutriologoProvider: React.FC<NutriologoProviderProps> = ({ children
         console.log('🟢 CASO: Nutriólogo asignado y CON dieta');
         setEstadoNutriologo('asignado_con_dieta');
       }
+
+      await setCachedNutriologoState(pacienteId, {
+        nutriologo: {
+          id_nutriologo: nutriologoInfo.id_nutriologo,
+          nombre: nutriologoInfo.nombre,
+          apellido: nutriologoInfo.apellido,
+          correo: nutriologoInfo.correo,
+          especialidad: nutriologoInfo.especialidad,
+          cedula_profesional: nutriologoInfo.cedula_profesional,
+          foto_perfil: nutriologoInfo.foto_perfil,
+          descripcion: nutriologoInfo.descripcion,
+          calificacion_promedio: nutriologoInfo.calificacion_promedio,
+        },
+        tieneDietaAsignada: tieneDieta,
+        estadoNutriologo: tieneDieta ? 'asignado_con_dieta' : 'asignado_sin_dieta',
+      });
 
     } catch (error) {
       const netInfo = await NetInfo.fetch();

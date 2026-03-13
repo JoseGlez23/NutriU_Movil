@@ -2,12 +2,13 @@ import React, { useState, useRef, useMemo, useEffect, useCallback } from 'react'
 import { 
   View, Text, StyleSheet, Image, TouchableOpacity, Animated, 
   Modal, ScrollView, Dimensions, Vibration, SafeAreaView, StatusBar,
-  Easing, RefreshControl
+  Easing, RefreshControl, Alert, ActivityIndicator
 } from 'react-native';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { useUser } from '../hooks/useUser';
 import { useFocusEffect } from '@react-navigation/native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { supabase } from '../lib/supabase';
 
 const { width } = Dimensions.get('window');
 
@@ -42,6 +43,9 @@ export default function PointsScreen({ navigation }: any) {
   const [currentIdx, setCurrentIdx] = useState(0);
   const [showModal, setShowModal] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [canjesDisponibles, setCanjesDisponibles] = useState<any[]>([]);
+  const [loadingCanjes, setLoadingCanjes] = useState(false);
+  const [claimingRewardId, setClaimingRewardId] = useState<number | null>(null);
 
   const shakeAnim = useRef(new Animated.Value(0)).current;
   const scaleAnim = useRef(new Animated.Value(1)).current;
@@ -96,6 +100,7 @@ export default function PointsScreen({ navigation }: any) {
       setErrorMsg(null);
 
       let newPoints = 0;
+      let cacheHit = false;
 
       // 1. Intentar caché (si no forzamos fresco)
       if (!forceFresh) {
@@ -105,15 +110,24 @@ export default function PointsScreen({ navigation }: any) {
           if (Date.now() - parsed.timestamp <= POINTS_CACHE_TTL) {
             console.log("[PointsScreen] Usando caché fresco (<10s)");
             newPoints = parsed.puntos_totales || 0;
+            cacheHit = true;
           } else {
             console.log("[PointsScreen] Caché expirado (>10s) → fetch fresco");
           }
         }
       }
 
-      // 2. Fetch fresco si necesario
-      const points = await fetchUserPointsFast();
-      newPoints = points.puntos_totales || 0;
+      // 2. Fetch fresco SOLO si no hubo cache hit
+      if (!cacheHit) {
+        const points = await fetchUserPointsFast();
+        newPoints = points.puntos_totales || 0;
+
+        // Guardar en caché
+        await AsyncStorage.setItem('points_cache', JSON.stringify({
+          puntos_totales: newPoints,
+          timestamp: Date.now(),
+        }));
+      }
 
       // 3. Actualizar solo si cambió (evita re-renders innecesarios)
       setUserPoints(prev => {
@@ -123,12 +137,6 @@ export default function PointsScreen({ navigation }: any) {
         }
         return prev;
       });
-
-      // 4. Guardar en caché
-      await AsyncStorage.setItem('points_cache', JSON.stringify({
-        puntos_totales: newPoints,
-        timestamp: Date.now(),
-      }));
     } catch (error) {
       console.error("[PointsScreen] Error loading points:", error);
       setErrorMsg("Error al cargar puntos. Intenta de nuevo.");
@@ -139,26 +147,155 @@ export default function PointsScreen({ navigation }: any) {
     }
   }, [fetchUserPointsFast]);
 
-  // Carga inicial (solo al montar)
-  useEffect(() => {
-    console.log("[PointsScreen] Montaje inicial → carga puntos");
-    loadPoints();
-  }, [loadPoints]);
+  // Cargar canjes disponibles del paciente
+  const loadCanjes = useCallback(async () => {
+    if (!user?.id_paciente) return;
+    
+    setLoadingCanjes(true);
+    try {
+      // Se usa esquema actual: recompensas + puntos del paciente (sin endpoint exchange).
+      const points = await fetchUserPointsFast();
+      const puntosTotales = Number(points?.puntos_totales || 0);
 
-  // Refresco suave al enfocar (sin setLoading(true), solo si no loading)
+      const { data: recompensas, error } = await supabase
+        .from('recompensas')
+        .select('id_recompensa, nombre, descripcion, tipo_recompensa, puntos_requeridos, activa')
+        .eq('activa', true)
+        .order('puntos_requeridos', { ascending: true });
+
+      const { data: canjesPaciente } = await supabase
+        .from('canje_recompensas')
+        .select('id_recompensa, estado')
+        .eq('id_paciente', user.id_paciente);
+
+      if (error) {
+        console.warn('[PointsScreen] No se pudieron cargar recompensas:', error.message);
+        setCanjesDisponibles([]);
+        return;
+      }
+
+      const claimedSet = new Set(
+        (canjesPaciente || [])
+          .filter((item: any) => item?.estado !== 'cancelado')
+          .map((item: any) => Number(item.id_recompensa))
+      );
+
+      const mappedCanjes = (recompensas || []).map((reward: any) => ({
+        id_canje_paciente: `reward-${reward.id_recompensa}`,
+        id_recompensa: reward.id_recompensa,
+        desbloqueado: reward.puntos_requeridos <= puntosTotales,
+        yaReclamado: claimedSet.has(Number(reward.id_recompensa)),
+        canjes: {
+          id_canje: reward.id_recompensa,
+          nombre_canje: reward.nombre,
+          tipo_canje: reward.tipo_recompensa === 'descuento' ? 'descuento' : 'consulta_gratis',
+          valor_descuento: reward.tipo_recompensa === 'descuento' ? null : null,
+          cantidad_consultas: 1,
+          descripcion: reward.descripcion,
+          puntos_requeridos: reward.puntos_requeridos,
+        }
+      }));
+
+      // Disponibles primero, después bloqueadas ordenadas por puntos requeridos
+      mappedCanjes.sort((a: any, b: any) => {
+        if (a.desbloqueado !== b.desbloqueado) return a.desbloqueado ? -1 : 1;
+        return a.canjes.puntos_requeridos - b.canjes.puntos_requeridos;
+      });
+
+      setCanjesDisponibles(mappedCanjes);
+    } catch (error) {
+      console.error('[PointsScreen] Error fetching canjes:', error);
+      setCanjesDisponibles([]);
+    } finally {
+      setLoadingCanjes(false);
+    }
+  }, [fetchUserPointsFast, user?.id_paciente]);
+
+  const claimReward = useCallback(async (reward: any) => {
+    if (!user?.id_paciente || !reward?.id_recompensa) {
+      Alert.alert('Error', 'No se pudo reclamar esta recompensa.');
+      return;
+    }
+
+    const idRecompensa = Number(reward.id_recompensa);
+    if (!Number.isFinite(idRecompensa)) {
+      Alert.alert('Error', 'Recompensa inválida.');
+      return;
+    }
+
+    setClaimingRewardId(idRecompensa);
+    try {
+      const { data: existingCanje } = await supabase
+        .from('canje_recompensas')
+        .select('id_canje')
+        .eq('id_paciente', user.id_paciente)
+        .eq('id_recompensa', idRecompensa)
+        .in('estado', ['pendiente', 'entregado'])
+        .maybeSingle();
+
+      if (existingCanje?.id_canje) {
+        Alert.alert('Aviso', 'Esta recompensa ya fue reclamada.');
+        await loadCanjes();
+        return;
+      }
+
+      const puntosGastados = Number(reward?.puntos_requeridos || 0);
+      const codigoCanje = `CNJ-${idRecompensa}-${user.id_paciente}-${Date.now()}`;
+
+      const { error: insertCanjeError } = await supabase
+        .from('canje_recompensas')
+        .insert({
+          id_paciente: user.id_paciente,
+          id_recompensa: idRecompensa,
+          puntos_gastados: puntosGastados,
+          estado: 'pendiente',
+          codigo_canje: codigoCanje,
+        });
+
+      if (insertCanjeError) throw insertCanjeError;
+
+      Alert.alert('Listo', 'Recompensa reclamada correctamente. Ya puedes usarla en el pago.');
+      await loadCanjes();
+    } catch (error: any) {
+      console.error('[PointsScreen] Error reclamando recompensa:', error);
+      Alert.alert('Error', error?.message || 'No se pudo reclamar la recompensa.');
+    } finally {
+      setClaimingRewardId(null);
+    }
+  }, [loadCanjes, user?.id_paciente]);
+
+  // Ref para evitar doble carga al montar (useEffect + useFocusEffect ambos disparan en el primer render)
+  const hasMountedRef = useRef(false);
+
+  // Carga inicial - corre una sola vez al montar
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    console.log("[PointsScreen] Montaje inicial → carga puntos y canjes");
+    loadPoints();
+    loadCanjes();
+  }, []); // deps vacías: loadPoints/loadCanjes son estables gracias a useCallback
+
+  // Refresco suave al re-enfocar – omite el primer focus (cubierto por useEffect)
   useFocusEffect(
     useCallback(() => {
-      console.log("[PointsScreen] Focus: refrescando puntos");
-      if (!loading) {
-        loadPoints();
+      if (!hasMountedRef.current) {
+        hasMountedRef.current = true;
+        return; // primer focus: useEffect ya hizo la carga
       }
-    }, [loadPoints, loading])
+      console.log("[PointsScreen] Focus: refrescando puntos y canjes");
+      loadPoints();
+      loadCanjes();
+    }, [loadCanjes, loadPoints]) // sin `loading` en deps
   );
 
   // Pull-to-refresh (fuerza refresh fresco)
   const onRefresh = async () => {
     setRefreshing(true);
-    await loadPoints(true); // forceFresh = true
+    await Promise.all([
+      loadPoints(true), // forceFresh = true
+      loadCanjes()      // reload canjes
+    ]);
+    setRefreshing(false);
   };
 
   const state = useMemo(() => {
@@ -353,6 +490,70 @@ export default function PointsScreen({ navigation }: any) {
           </TouchableOpacity>
         </View>
 
+        {/* SECCIÓN DE RECOMPENSAS (disponibles + por desbloquear) */}
+        {canjesDisponibles.length > 0 && (
+          <View style={styles.canjesSection}>
+            <Text style={styles.canjesSectionTitle}>🎁 RECOMPENSAS</Text>
+            <Text style={styles.canjesSectionSubtitle}>Acumula puntos para desbloquear recompensas</Text>
+            
+            {canjesDisponibles.map((canjeData: any, idx: number) => {
+              const canje = canjeData.canjes;
+              const desbloqueado: boolean = canjeData.desbloqueado;
+              const yaReclamado: boolean = canjeData.yaReclamado;
+              const icon = desbloqueado
+                ? (canje.tipo_canje === 'descuento' ? '📉' : '⭐')
+                : '🔒';
+              const faltanPuntos = canje.puntos_requeridos - userPoints;
+              
+              return (
+                <TouchableOpacity
+                  key={idx}
+                  style={[styles.canjeCard, !desbloqueado && styles.canjeCardLocked]}
+                  activeOpacity={desbloqueado ? 0.7 : 1}
+                >
+                  <View style={styles.canjeCardContent}>
+                    <Text style={styles.canjeIcon}>{icon}</Text>
+                    <View style={styles.canjeInfo}>
+                      <Text style={[styles.canjeName, !desbloqueado && styles.canjeNameLocked]}>
+                        {canje.nombre_canje}
+                      </Text>
+                      <Text style={[styles.canjeType, !desbloqueado && styles.canjeTypeLocked]}>
+                        {`Requiere ${canje.puntos_requeridos} pts`}
+                      </Text>
+                    </View>
+                  </View>
+                  {desbloqueado ? (
+                    yaReclamado ? (
+                      <View style={styles.canjeStateClaimed}>
+                        <Text style={styles.canjeStateClaimedText}>RECLAMADO</Text>
+                      </View>
+                    ) : (
+                      <TouchableOpacity
+                        style={styles.claimButton}
+                        onPress={() => claimReward({
+                          id_recompensa: canjeData.id_recompensa,
+                          puntos_requeridos: canje.puntos_requeridos,
+                        })}
+                        disabled={claimingRewardId === canjeData.id_recompensa}
+                      >
+                        {claimingRewardId === canjeData.id_recompensa ? (
+                          <ActivityIndicator color={COLORS.white} size="small" />
+                        ) : (
+                          <Text style={styles.claimButtonText}>RECLAMAR</Text>
+                        )}
+                      </TouchableOpacity>
+                    )
+                  ) : (
+                    <View style={styles.canjeStateLocked}>
+                      <Text style={styles.canjeStateLockedText}>Faltan {faltanPuntos} pts</Text>
+                    </View>
+                  )}
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+        )}
+
         {/* INFORMACIÓN DE PROGRESO */}
         <View style={styles.infoSection}>
           <View style={styles.metricsGrid}>
@@ -486,6 +687,56 @@ const styles = StyleSheet.create({
   miniTrophyImg: { width: 40, height: 40, resizeMode: 'contain' },
   trophyProgressLabel: { fontSize: 10, fontWeight: '800', color: COLORS.primary, marginTop: 2 },
   infoSection: { width: '100%', marginTop: 6, marginBottom: 18 },
+    canjesSection: { width: '100%', marginVertical: 16 },
+    canjesSectionTitle: { fontSize: 14, fontWeight: '900', color: COLORS.primary, marginBottom: 4, letterSpacing: 0.5, textAlign: 'center' },
+    canjesSectionSubtitle: { fontSize: 11, color: COLORS.textLight, marginBottom: 12, textAlign: 'center', fontWeight: '600' },
+    canjeCard: {
+      backgroundColor: COLORS.white,
+      borderRadius: 16,
+      borderWidth: 2,
+      borderColor: COLORS.accent,
+      marginBottom: 10,
+      padding: 12,
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      elevation: 2,
+      shadowColor: COLORS.primary,
+      shadowOpacity: 0.1,
+      shadowRadius: 3,
+      shadowOffset: { width: 0, height: 2 }
+    },
+    canjeCardContent: { flexDirection: 'row', alignItems: 'center', flex: 1 },
+    canjeIcon: { fontSize: 24, marginRight: 12 },
+    canjeInfo: { flex: 1 },
+    canjeName: { fontSize: 12, fontWeight: '900', color: COLORS.textDark, marginBottom: 2 },
+    canjeType: { fontSize: 10, color: COLORS.accent, fontWeight: '600' },
+    canjeState: { backgroundColor: COLORS.secondary, paddingHorizontal: 10, paddingVertical: 4, borderRadius: 8, borderWidth: 1, borderColor: COLORS.accent },
+    canjeStateText: { fontSize: 9, fontWeight: '900', color: COLORS.accent, letterSpacing: 0.3 },
+    canjeCardLocked: { borderColor: '#CBD5E0', opacity: 0.75 },
+    canjeNameLocked: { color: '#718096' },
+    canjeTypeLocked: { color: '#A0AEC0' },
+    canjeStateLocked: { backgroundColor: '#EDF2F7', paddingHorizontal: 10, paddingVertical: 4, borderRadius: 8, borderWidth: 1, borderColor: '#CBD5E0' },
+    canjeStateLockedText: { fontSize: 9, fontWeight: '700', color: '#718096', letterSpacing: 0.2 },
+    claimButton: {
+      backgroundColor: COLORS.primary,
+      paddingHorizontal: 12,
+      paddingVertical: 7,
+      borderRadius: 8,
+      minWidth: 88,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    claimButtonText: { fontSize: 10, fontWeight: '900', color: COLORS.white, letterSpacing: 0.4 },
+    canjeStateClaimed: {
+      backgroundColor: '#E6FFFA',
+      paddingHorizontal: 10,
+      paddingVertical: 4,
+      borderRadius: 8,
+      borderWidth: 1,
+      borderColor: '#81E6D9',
+    },
+    canjeStateClaimedText: { fontSize: 9, fontWeight: '900', color: '#2C7A7B', letterSpacing: 0.3 },
   metricsGrid: {
     flexDirection: 'row',
     gap: 10,

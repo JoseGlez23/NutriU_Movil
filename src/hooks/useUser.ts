@@ -1,13 +1,16 @@
-// useUser.ts con caché implementado (TTL reducido a 5 segundos para forzar refresco frecuente)
+// useUser.ts con caché optimizado para arranque rápido
 import { useState, useEffect, useCallback } from "react";
 import { supabase } from "../lib/supabase";
 import { useAuth } from "../context/AuthContext";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import NetInfo from "@react-native-community/netinfo";
 
-// TTL muy agresivo: 5 segundos (5000 ms) - se fuerza refresh frecuente
-const CACHE_TTL = 5000;
+// TTL de 5 minutos para evitar recargas completas en cada reapertura/recarga.
+const CACHE_TTL = 5 * 60 * 1000;
 const OFFLINE_MESSAGE = "No tienes internet. Revisa tu conexión.";
+const BACKEND_URL =
+  process.env.EXPO_PUBLIC_BACKEND_URL ||
+  "https://carolin-nonprovisional-correctly.ngrok-free.dev";
 
 export const useUser = () => {
   const { user: authUser, session } = useAuth();
@@ -57,108 +60,113 @@ export const useUser = () => {
     }
   };
 
-  const fetchUserData = useCallback(async () => {
-    try {
-      setLoading(true);
-      setError(null);
+  const fetchUserData = useCallback(
+    async (forceFresh = false) => {
+      try {
+        setError(null);
 
-      if (!authUser?.email) {
-        setUserData(null);
-        setLoading(false);
-        return;
-      }
-
-      const email = authUser.email.toLowerCase();
-      const cacheKey = `user_${email}`;
-
-      // Intenta cargar desde caché
-      let cachedData = await getCachedData(cacheKey);
-      if (cachedData) {
-        setUserData(cachedData);
-      }
-
-      const netInfo = await NetInfo.fetch();
-      const isOnline = Boolean(
-        netInfo.isConnected && netInfo.isInternetReachable !== false,
-      );
-
-      if (!isOnline) {
-        if (cachedData) {
-          setError(OFFLINE_MESSAGE);
+        if (!authUser?.email) {
+          setUserData(null);
+          setLoading(false);
           return;
         }
 
-        setError(OFFLINE_MESSAGE);
-        setUserData(null);
-        return;
-      }
+        const email = authUser.email.toLowerCase();
+        const cacheKey = `user_${email}`;
 
-      // Obtener datos del paciente
-      const { data: paciente, error: pacienteError } = await supabase
-        .from("pacientes")
-        .select("*")
-        .eq("correo", email)
-        .single();
-
-      if (pacienteError) {
-        setError(OFFLINE_MESSAGE);
-        if (!cachedData) {
-          setUserData(null);
+        // Intenta cargar desde caché y úsalo inmediatamente para no bloquear la UI.
+        let cachedData = forceFresh ? null : await getCachedData(cacheKey);
+        if (cachedData) {
+          setUserData(cachedData);
+          setLoading(false);
+        } else {
+          setLoading(true);
         }
-        return;
+
+        const netInfo = await NetInfo.fetch();
+        const isOnline = Boolean(
+          netInfo.isConnected && netInfo.isInternetReachable !== false,
+        );
+
+        if (!isOnline) {
+          if (cachedData) {
+            setError(OFFLINE_MESSAGE);
+            return;
+          }
+
+          setError(OFFLINE_MESSAGE);
+          setUserData(null);
+          return;
+        }
+
+        // Obtener datos del paciente
+        const { data: paciente, error: pacienteError } = await supabase
+          .from("pacientes")
+          .select("*")
+          .eq("correo", email)
+          .single();
+
+        if (pacienteError) {
+          setError(OFFLINE_MESSAGE);
+          if (!cachedData) {
+            setUserData(null);
+          }
+          return;
+        }
+
+        if (!paciente) {
+          setError("No se encontró perfil de paciente para este usuario");
+          setUserData(null);
+          return;
+        }
+
+        // Obtener puntos
+        const { data: puntos, error: puntosError } = await supabase
+          .from("puntos_paciente")
+          .select("*")
+          .eq("id_paciente", paciente.id_paciente)
+          .maybeSingle();
+
+        if (puntosError && puntosError.code !== "PGRST116") {
+          console.error("Error al cargar puntos:", puntosError);
+        }
+
+        // Formatear los datos
+        const formattedData = {
+          ...paciente,
+          tipo_usuario: "paciente",
+          puntos_totales: puntos?.puntos_totales || 0,
+          puntos_hoy: puntos?.puntos_hoy || 0,
+          nivel: puntos?.nivel || "principiante",
+        };
+
+        // Guardar en caché y actualizar estado
+        await setCachedData(cacheKey, formattedData);
+        setUserData(formattedData);
+
+        console.log(
+          "✅ Datos de usuario cargados, id_paciente:",
+          paciente.id_paciente,
+        );
+      } catch (error: any) {
+        const netInfo = await NetInfo.fetch();
+        const isOnline = Boolean(
+          netInfo.isConnected && netInfo.isInternetReachable !== false,
+        );
+
+        if (!isOnline) {
+          setError(OFFLINE_MESSAGE);
+        } else {
+          setError(OFFLINE_MESSAGE);
+        }
+
+        setUserData((prev) => prev ?? null);
+      } finally {
+        setLoading(false);
       }
-
-      if (!paciente) {
-        setError("No se encontró perfil de paciente para este usuario");
-        setUserData(null);
-        return;
-      }
-
-      // Obtener puntos
-      const { data: puntos, error: puntosError } = await supabase
-        .from("puntos_paciente")
-        .select("*")
-        .eq("id_paciente", paciente.id_paciente)
-        .maybeSingle();
-
-      if (puntosError && puntosError.code !== "PGRST116") {
-        console.error("Error al cargar puntos:", puntosError);
-      }
-
-      // Formatear los datos
-      const formattedData = {
-        ...paciente,
-        tipo_usuario: "paciente",
-        puntos_totales: puntos?.puntos_totales || 0,
-        puntos_hoy: puntos?.puntos_hoy || 0,
-        nivel: puntos?.nivel || "principiante",
-      };
-
-      // Guardar en caché y actualizar estado
-      await setCachedData(cacheKey, formattedData);
-      setUserData(formattedData);
-
-      console.log(
-        "✅ Datos de usuario cargados, id_paciente:",
-        paciente.id_paciente,
-      );
-    } catch (error: any) {
-      const netInfo = await NetInfo.fetch();
-      const isOnline = Boolean(
-        netInfo.isConnected && netInfo.isInternetReachable !== false,
-      );
-
-      if (!isOnline) {
-        setError(OFFLINE_MESSAGE);
-      } else {
-        setError(OFFLINE_MESSAGE);
-      }
-
-      setUserData((prev) => prev ?? null);
-    } finally {
-      setLoading(false);
-    }
-  }, [authUser?.email]);
+    },
+    [authUser?.email],
+  );
 
   // Función para refrescar manualmente (fuerza la carga desde BD)
   const refreshUser = useCallback(async () => {
@@ -169,7 +177,7 @@ export const useUser = () => {
       await AsyncStorage.removeItem(cacheKey);
       console.log("🗑️ Caché eliminada para:", authUser.email);
     }
-    await fetchUserData();
+    await fetchUserData(true);
     console.log(
       "✅ Usuario refrescado, nuevo id_paciente:",
       userData?.id_paciente,
@@ -266,6 +274,22 @@ export const useUser = () => {
         fecha: new Date().toISOString(),
       });
 
+      try {
+        await fetch(`${BACKEND_URL}/exchange/check-and-award-canjes`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            id_paciente: userData.id_paciente,
+            puntos_totales: nuevosPuntosTotales,
+          }),
+        });
+      } catch (awardError) {
+        console.warn(
+          "No se pudieron revisar canjes desbloqueados:",
+          awardError,
+        );
+      }
+
       // Actualización local
       setUserData((prev: any) => {
         if (!prev) return prev;
@@ -296,8 +320,9 @@ export const useUser = () => {
     }
   };
 
-  // Función rápida para cargar SOLO puntos con caché de 5 segundos
-  const fetchUserPointsFast = async () => {
+  // Función rápida para cargar SOLO puntos con caché.
+  // useCallback es OBLIGATORIO para que loadPoints/loadCanjes en PointsScreen sean estables
+  const fetchUserPointsFast = useCallback(async () => {
     try {
       if (!authUser?.email) {
         return { puntos_totales: 0, puntos_hoy: 0, nivel: "principiante" };
@@ -306,10 +331,10 @@ export const useUser = () => {
       const email = authUser.email.toLowerCase();
       const cacheKey = `user_points_${email}`;
 
-      // 1. Intenta cargar desde caché (expira en 5 seg)
+      // 1. Intenta cargar desde caché
       let cachedPoints = await getCachedData(cacheKey);
       if (cachedPoints) {
-        console.log("Puntos cargados DESDE CACHÉ (fresco <5 seg)");
+        console.log("Puntos cargados DESDE CACHÉ");
         return cachedPoints;
       }
 
@@ -349,7 +374,7 @@ export const useUser = () => {
       console.error("Error fetchUserPointsFast:", err);
       return { puntos_totales: 0, puntos_hoy: 0, nivel: "principiante" };
     }
-  };
+  }, [authUser?.email]);
 
   return {
     user: userData,

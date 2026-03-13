@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { 
   View, 
   Text, 
@@ -27,6 +27,9 @@ import { useNutriologo } from '../context/NutriologoContext';
 import { supabase } from '../lib/supabase';
 import { useUser } from '../hooks/useUser';
 import { CardField, useStripe } from '@stripe/stripe-react-native';
+import NetInfo from '@react-native-community/netinfo';
+import { saveToCache, getFromCache } from '../utils/offlineCache';
+import { useNetwork } from '../utils/NetworkHandler';
 
 const { width } = Dimensions.get('window');
 
@@ -64,6 +67,9 @@ const PAYMENT_COLORS = {
 };
 
 const SONORA_TIMEZONE = 'America/Phoenix';
+const BACKEND_URL =
+  process.env.EXPO_PUBLIC_BACKEND_URL ||
+  'https://carolin-nonprovisional-correctly.ngrok-free.dev';
 
 const parseDbTimestampAsUtc = (value: string) => {
   const baseValue = String(value || '').trim().replace(' ', 'T');
@@ -95,10 +101,71 @@ const parseDbTimestampAsUtc = (value: string) => {
 const CLINIC_OPEN_HOUR = 7;
 const CLINIC_CLOSE_HOUR = 16;
 
+const roundCurrency = (value: number) => Math.round((Number(value) + Number.EPSILON) * 100) / 100;
+
+const inferDiscountPercentFromReward = (reward: any) => {
+  const text = `${reward?.descripcion || ''} ${reward?.nombre || ''}`;
+  const match = String(text).match(/(\d+(?:\.\d+)?)\s*%/);
+  if (match) return Number(match[1]);
+  return 10;
+};
+
+const getCanjePreview = (basePrice: number, canjePaciente: any) => {
+  const montoOriginal = roundCurrency(Number(basePrice || 0));
+
+  if (!canjePaciente?.canjes) {
+    return {
+      montoOriginal,
+      descuentoAplicado: 0,
+      montoFinal: montoOriginal,
+      descripcion: null,
+      eligible: true,
+      ineligibleReason: null,
+    };
+  }
+
+  const canje = canjePaciente.canjes;
+  const montoMinimo = canje.monto_minimo_consulta ? Number(canje.monto_minimo_consulta) : null;
+  if (montoMinimo && montoOriginal < montoMinimo) {
+    return {
+      montoOriginal,
+      descuentoAplicado: 0,
+      montoFinal: montoOriginal,
+      descripcion: null,
+      eligible: false,
+      ineligibleReason: `Disponible para consultas desde $${montoMinimo.toFixed(2)} MXN`,
+    };
+  }
+
+  if (canje.tipo_canje === 'descuento') {
+    const descuentoTeorico = montoOriginal * (Number(canje.valor_descuento || 0) / 100);
+    const descuentoAplicado = roundCurrency(Math.min(descuentoTeorico, Math.max(0, montoOriginal - 1)));
+    return {
+      montoOriginal,
+      descuentoAplicado,
+      montoFinal: roundCurrency(Math.max(1, montoOriginal - descuentoAplicado)),
+      descripcion: `${canje.valor_descuento}% de descuento`,
+      eligible: true,
+      ineligibleReason: null,
+    };
+  }
+
+  const descuentoAplicado = roundCurrency(Math.max(0, montoOriginal - 1));
+  return {
+    montoOriginal,
+    descuentoAplicado,
+    montoFinal: roundCurrency(Math.max(1, montoOriginal - descuentoAplicado)),
+    descripcion: 'Consulta bonificada',
+    eligible: true,
+    ineligibleReason: null,
+  };
+};
+
 export default function ScheduleScreen({ navigation, route }: any) {
   const { user: authUser } = useAuth();
   const { user: patientData, refreshUser } = useUser();
   const { refreshNutriologo, nutriologo } = useNutriologo();
+  const { notifyOffline } = useNetwork();
 
   const [viewMode, setViewMode] = useState('agendar');
   const [doctors, setDoctors] = useState<any[]>([]);
@@ -112,6 +179,9 @@ export default function ScheduleScreen({ navigation, route }: any) {
   const [cardName, setCardName] = useState('');
   const [paymentError, setPaymentError] = useState<string | null>(null);
   const [citaId, setCitaId] = useState<number | null>(null);
+  const [availableCanjes, setAvailableCanjes] = useState<any[]>([]);
+  const [selectedCanjePaciente, setSelectedCanjePaciente] = useState<any | null>(null);
+  const [loadingCanjes, setLoadingCanjes] = useState(false);
 
   // Separar citas pendientes en dos categorías
   const [pendingPaymentAppointments, setPendingPaymentAppointments] = useState<any[]>([]);
@@ -129,19 +199,136 @@ export default function ScheduleScreen({ navigation, route }: any) {
 
   const { confirmPayment } = useStripe();
 
+  const paymentPreview = useMemo(() => {
+    return getCanjePreview(Number(selectedDoctor?.price || 0), selectedCanjePaciente);
+  }, [selectedDoctor?.price, selectedCanjePaciente]);
+
+  const loadAvailableCanjes = useCallback(async (nutriologoId: number) => {
+    // Cargar canjes reclamados pendientes (tabla real: canje_recompensas).
+    // El backend de pago valida id_canje sobre canje_recompensas.
+    if (!patientData?.id_paciente) {
+      setAvailableCanjes([]);
+      setSelectedCanjePaciente(null);
+      return;
+    }
+
+    setLoadingCanjes(true);
+    try {
+      let query = supabase
+        .from('canje_recompensas')
+        .select(`
+          id_canje,
+          id_paciente,
+          fecha_canje,
+          estado,
+          recompensas(
+            id_recompensa,
+            nombre,
+            descripcion,
+            tipo_recompensa,
+            activa
+          )
+        `)
+        .eq('id_paciente', patientData.id_paciente)
+        .eq('estado', 'pendiente')
+        .order('fecha_canje', { ascending: false });
+
+      const { data: canjesPaciente, error } = await query;
+
+      if (error) {
+        console.warn('[ScheduleScreen] No se pudieron cargar canjes del paciente:', error.message);
+        setAvailableCanjes([]);
+        setSelectedCanjePaciente(null);
+        return;
+      }
+
+      const canjes = (canjesPaciente || [])
+        .filter((item: any) => item?.recompensas && item.recompensas.activa !== false)
+        .filter((item: any) => item.recompensas.tipo_recompensa === 'descuento')
+        .map((item: any) => ({
+          id_canje_paciente: item.id_canje,
+          id_paciente: item.id_paciente,
+          id_nutriologo: nutriologoId || selectedDoctor?.realId || null,
+          estado: item.estado,
+          canjes: {
+            id_canje: item.recompensas.id_recompensa,
+            nombre_canje: item.recompensas.nombre,
+            tipo_canje: item.recompensas.tipo_recompensa === 'descuento' ? 'descuento' : 'consulta_gratis',
+            valor_descuento: item.recompensas.tipo_recompensa === 'descuento'
+              ? inferDiscountPercentFromReward(item.recompensas)
+              : null,
+            cantidad_consultas: 1,
+            descripcion: item.recompensas.descripcion,
+            monto_minimo_consulta: null,
+          },
+        }));
+
+      setAvailableCanjes(canjes);
+
+      setSelectedCanjePaciente((prevSelected: any) => {
+        if (!prevSelected) return null;
+        const stillExists = canjes.find(
+          (item: any) => item.id_canje_paciente === prevSelected.id_canje_paciente,
+        );
+        return stillExists || null;
+      });
+    } catch (error) {
+      console.error('Error cargando canjes disponibles:', error);
+      setAvailableCanjes([]);
+      setSelectedCanjePaciente(null);
+    } finally {
+      setLoadingCanjes(false);
+    }
+  }, [patientData?.id_paciente, selectedDoctor?.realId]);
+
+  // Re-disparar carga de canjes cuando patientData termina de hidratarse
+  // (cubre el caso donde el componente monta antes de que useUser resuelva el perfil)
+  const lastNutriologoIdRef = useRef<number>(0);
+  const lastProcessedRouteCitaIdRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (patientData?.id_paciente && lastNutriologoIdRef.current !== undefined) {
+      loadAvailableCanjes(lastNutriologoIdRef.current);
+    }
+  }, [patientData?.id_paciente, loadAvailableCanjes]);
+
+  const formatDoctors = (data: any[] = []) => {
+    return data.map((d: any) => {
+      const photoUrl = d.foto_perfil && d.foto_perfil.trim() !== '' && d.foto_perfil !== 'nutriologo_default.png'
+        ? d.foto_perfil
+        : null;
+
+      return {
+        id: d.id_nutriologo.toString(),
+        name: `Dr. ${d.nombre} ${d.apellido}`,
+        specialty: d.especialidad || 'Nutrición Clínica',
+        price: d.tarifa_consulta || 800,
+        realId: d.id_nutriologo,
+        photoUrl,
+      };
+    });
+  };
+
   // Detectar si viene desde Calendar con citaId
   useEffect(() => {
-    if (route.params?.citaId) {
-      setCitaId(route.params.citaId);
+    const incomingCitaId = Number(route.params?.citaId);
+    if (incomingCitaId && lastProcessedRouteCitaIdRef.current !== incomingCitaId) {
+      lastProcessedRouteCitaIdRef.current = incomingCitaId;
+      setCitaId(incomingCitaId);
       const doctorId = Number(route.params.doctorId);
+      const doctorPrice = Number(route.params.precio || 800);
       setSelectedDoctor({ 
         name: route.params.doctorName || 'Nutriólogo',
         realId: isNaN(doctorId) ? 0 : doctorId,
-        price: route.params.precio || 800
+        price: doctorPrice,
+        originalPrice: doctorPrice,
       });
+      setSelectedCanjePaciente(null);
+      const resolvedId = isNaN(doctorId) ? 0 : doctorId;
+      lastNutriologoIdRef.current = resolvedId;
+      loadAvailableCanjes(resolvedId);
       setPaymentStep('checkout');
     }
-  }, [route.params]);
+  }, [loadAvailableCanjes, route.params]);
 
   useEffect(() => {
     const initialTab = route.params?.initialTab;
@@ -219,8 +406,27 @@ export default function ScheduleScreen({ navigation, route }: any) {
 
   // Función para cargar doctores
   const fetchDoctors = async () => {
+    const cacheKey = 'schedule_doctors';
+
     try {
       setLoading(true);
+
+      const cachedDoctors = await getFromCache(cacheKey);
+      if (Array.isArray(cachedDoctors) && cachedDoctors.length > 0) {
+        setDoctors(cachedDoctors);
+      }
+
+      const netInfo = await NetInfo.fetch();
+      const isOnline = Boolean(netInfo.isConnected && netInfo.isInternetReachable !== false);
+
+      if (!isOnline) {
+        notifyOffline();
+        if (!Array.isArray(cachedDoctors) || cachedDoctors.length === 0) {
+          Alert.alert('Sin conexión', 'No hay internet para cargar nutriólogos y no hay datos guardados en este dispositivo.');
+        }
+        return;
+      }
+
       const { data, error } = await supabase
         .from('nutriologos')
         .select('id_nutriologo, nombre, apellido, especialidad, tarifa_consulta, foto_perfil')
@@ -229,28 +435,22 @@ export default function ScheduleScreen({ navigation, route }: any) {
 
       if (error) {
         console.error('Error al cargar nutriólogos:', error.message);
-        Alert.alert('Error', 'No se pudieron cargar los nutriólogos. Intenta más tarde.');
+        if (!Array.isArray(cachedDoctors) || cachedDoctors.length === 0) {
+          Alert.alert('Error', 'No se pudieron cargar los nutriólogos. Intenta más tarde.');
+        }
         return;
       }
 
-      const formatted = data?.map(d => {
-        const photoUrl = d.foto_perfil && d.foto_perfil.trim() !== '' && d.foto_perfil !== 'nutriologo_default.png'
-          ? d.foto_perfil
-          : null;
-
-        return {
-          id: d.id_nutriologo.toString(),
-          name: `Dr. ${d.nombre} ${d.apellido}`,
-          specialty: d.especialidad || 'Nutrición Clínica',
-          price: d.tarifa_consulta || 800,
-          realId: d.id_nutriologo,
-          photoUrl,
-        };
-      }) || [];
+      const formatted = formatDoctors(data || []);
 
       setDoctors(formatted);
+      await saveToCache(cacheKey, formatted);
     } catch (err) {
       console.error('Excepción al cargar nutriólogos:', err);
+      const cachedDoctors = await getFromCache('schedule_doctors');
+      if (!Array.isArray(cachedDoctors) || cachedDoctors.length === 0) {
+        Alert.alert('Error', 'No se pudieron cargar los nutriólogos. Intenta más tarde.');
+      }
     } finally {
       setLoading(false);
     }
@@ -319,7 +519,7 @@ export default function ScheduleScreen({ navigation, route }: any) {
         `)
         .eq('id_paciente', patientData.id_paciente)
         .eq('id_nutriologo', nutriologo.id_nutriologo)
-        .in('estado', ['pendiente', 'pagada', 'confirmada', 'completada'])
+        .in('estado', ['pendiente', 'pendiente_pagado', 'confirmada', 'completada'])
         .order('fecha_hora', { ascending: false });
 
       if (error) {
@@ -359,10 +559,10 @@ export default function ScheduleScreen({ navigation, route }: any) {
         const pagos = Array.isArray(cita.pagos) ? cita.pagos : [];
         const tienePago = pagos.length > 0 && pagos[0]?.estado === 'completado';
         
-        // Estado real basado en pago y estado de cita
+        // Estado derivado para UI: "pendiente_pagado" = cita pagada en espera de confirmación.
         let estadoReal = cita.estado;
         if (cita.estado === 'pendiente' && tienePago) {
-          estadoReal = 'pagada';
+          estadoReal = 'pendiente_pagado';
         }
 
         return {
@@ -391,7 +591,7 @@ export default function ScheduleScreen({ navigation, route }: any) {
       );
       
       const paidPending = formatted.filter((a: any) => 
-        a && (a.estado === 'pagada' || (a.estado === 'pendiente' && a.tienePago))
+        a && (a.estado === 'pendiente_pagado' || (a.estado === 'pendiente' && a.tienePago))
       );
       
       const confirmed = formatted.filter((a: any) => 
@@ -493,13 +693,16 @@ export default function ScheduleScreen({ navigation, route }: any) {
     );
   };
 
-  const handlePaymentFromPending = (appointment: any) => {
+  const handlePaymentFromPending = async (appointment: any) => {
     setSelectedDoctor({
       name: appointment.doctorName,
       realId: appointment.id_nutriologo,
-      price: appointment.monto
+      price: appointment.monto,
+      originalPrice: appointment.monto,
     });
     setCitaId(appointment.id);
+    setSelectedCanjePaciente(null);
+    await loadAvailableCanjes(Number(appointment.id_nutriologo));
     setPaymentStep('checkout');
   };
 
@@ -526,14 +729,55 @@ export default function ScheduleScreen({ navigation, route }: any) {
     setPaymentError(null);
 
     try {
-      const response = await fetch('https://servidor-nutri-u.vercel.app/payments/create-payment-intent', {
+      // Validar cita antes de enviar al backend para evitar errores con IDs viejos.
+      let effectiveCitaId = Number(citaId);
+      const { data: citaActual, error: citaActualError } = await supabase
+        .from('citas')
+        .select('id_cita, estado, id_nutriologo')
+        .eq('id_cita', effectiveCitaId)
+        .eq('id_paciente', patientData.id_paciente)
+        .maybeSingle();
+
+      const citaEsValida = !citaActualError && citaActual && citaActual.estado === 'pendiente';
+
+      if (!citaEsValida) {
+        const fallbackQuery = supabase
+          .from('citas')
+          .select('id_cita, estado, id_nutriologo')
+          .eq('id_paciente', patientData.id_paciente)
+          .eq('estado', 'pendiente')
+          .order('fecha_hora', { ascending: false })
+          .limit(1);
+
+        const { data: fallbackCitas, error: fallbackError } = selectedDoctor?.realId
+          ? await fallbackQuery.eq('id_nutriologo', Number(selectedDoctor.realId))
+          : await fallbackQuery;
+
+        if (!fallbackError && fallbackCitas && fallbackCitas.length > 0) {
+          effectiveCitaId = Number(fallbackCitas[0].id_cita);
+          setCitaId(effectiveCitaId);
+          console.warn('[ScheduleScreen] Se reemplazó citaId desactualizada por:', effectiveCitaId);
+        } else {
+          await fetchAppointments();
+          closeModal();
+          setViewMode('pendientes');
+          Alert.alert(
+            'Pago no disponible',
+            'No encontramos una cita pendiente valida para pagar. Actualiza tus citas e intenta de nuevo.'
+          );
+          return;
+        }
+      }
+
+      const response = await fetch(`${BACKEND_URL}/payments/create-payment-intent`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          appointmentId: citaId,
+          appointmentId: effectiveCitaId,
           userId: patientData.id_paciente,
           appointmentTitle: `Consulta con ${selectedDoctor.name}`,
-          monto: selectedDoctor.price
+          monto: selectedDoctor.originalPrice || selectedDoctor.price,
+          idCanjePaciente: selectedCanjePaciente?.id_canje_paciente || null,
         }),
       });
 
@@ -541,7 +785,25 @@ export default function ScheduleScreen({ navigation, route }: any) {
       console.log('Respuesta del backend (create-payment-intent):', text);
 
       if (!response.ok) {
-        throw new Error(`Error del backend: ${response.status} - ${text}`);
+        let backendMessage = '';
+        try {
+          backendMessage = JSON.parse(text)?.error || '';
+        } catch {
+          backendMessage = text;
+        }
+
+        if (response.status === 400 && backendMessage.includes('La cita no está en estado pendiente')) {
+          await fetchAppointments();
+          closeModal();
+          setViewMode('pendientes');
+          Alert.alert(
+            'Pago no disponible',
+            'Esta cita ya no está pendiente de pago. La lista de citas fue actualizada.'
+          );
+          return;
+        }
+
+        throw new Error(backendMessage || `Error del backend (${response.status})`);
       }
 
       const { clientSecret } = JSON.parse(text);
@@ -565,27 +827,17 @@ export default function ScheduleScreen({ navigation, route }: any) {
         throw new Error('El pago no fue completado exitosamente');
       }
 
-      // Guardar pago
-      const { error: insertError } = await supabase
-        .from('pagos')
-        .insert({
-          id_cita: citaId,
-          id_paciente: patientData.id_paciente,
-          id_nutriologo: selectedDoctor.realId,
-          monto: selectedDoctor.price,
-          metodo_pago: 'stripe',
-          estado: 'completado',
-          stripe_payment_id: paymentIntent.id,
-          fecha_pago: new Date().toISOString(),
-        });
+      // Registrar/confirmar en backend para centralizar lógica e idempotencia.
+      const confirmResponse = await fetch(`${BACKEND_URL}/payments/confirm-payment`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ paymentIntentId: paymentIntent.id }),
+      });
 
-      if (insertError) throw insertError;
-
-      // Actualizar cita
-      await supabase
-        .from('citas')
-        .update({ estado: 'pagada' })
-        .eq('id_cita', citaId);
+      const confirmBody = await confirmResponse.text();
+      if (!confirmResponse.ok) {
+        throw new Error(`Error confirmando pago en backend: ${confirmResponse.status} - ${confirmBody}`);
+      }
 
       // 🔥 VERIFICAR RELACIÓN CON NUTRIÓLOGO
       try {
@@ -646,26 +898,85 @@ export default function ScheduleScreen({ navigation, route }: any) {
         console.error('Error en asignación de nutriólogo:', error);
       }
 
-      // Recargar citas y cambiar vista
+      // Recargar citas y regresar directamente a pendientes.
+      if (patientData?.id_paciente && effectiveCitaId) {
+        try {
+          const { data: relatedNotifications } = await supabase
+            .from('notificaciones')
+            .select('id_notificacion, datos_adicionales')
+            .eq('id_usuario', patientData.id_paciente)
+            .eq('tipo_usuario', 'paciente')
+            .eq('datos_adicionales->>id_cita', String(effectiveCitaId));
+
+          for (const notif of relatedNotifications || []) {
+            await supabase
+              .from('notificaciones')
+              .update({
+                titulo: 'Cita pagada',
+                mensaje: 'Tu cita fue pagada correctamente. Espera la confirmación del nutriólogo.',
+                tipo: 'pago',
+                datos_adicionales: {
+                  ...(notif.datos_adicionales || {}),
+                  id_cita: effectiveCitaId,
+                  estado: 'pendiente_pagado',
+                  requiere_pago: false,
+                },
+              })
+              .eq('id_notificacion', notif.id_notificacion);
+          }
+        } catch (notificationUpdateError) {
+          console.warn('No se pudieron actualizar las notificaciones post-pago:', notificationUpdateError);
+        }
+      }
+
       await fetchAppointments();
       setViewMode('pendientes');
       setPaymentStep('success');
 
     } catch (err: any) {
       console.error('Error completo en handlePayment:', err);
-      setPaymentError(err.message || 'Error desconocido al procesar el pago.');
-      Alert.alert('Error en el pago', err.message || 'No se pudo completar el pago.');
+      const rawMessage = String(err?.message || '');
+      const rawLower = rawMessage.toLowerCase();
+      const isAppointmentNotFound =
+        rawLower.includes('cita no encontrada') ||
+        rawLower.includes('invalida') ||
+        rawLower.includes('inválida');
+      const userMessage = rawMessage.includes('La cita no está en estado pendiente')
+        ? 'Esta cita ya no está disponible para pago.'
+        : isAppointmentNotFound
+          ? 'La cita ya no existe o cambió. Recargamos tus citas pendientes para que elijas una válida.'
+        : rawMessage.includes('No se pudo conectar')
+          ? 'No se pudo conectar con el servidor de pagos. Intenta nuevamente.'
+          : rawMessage || 'No se pudo completar el pago.';
+      if (isAppointmentNotFound) {
+        await fetchAppointments();
+        setViewMode('pendientes');
+      }
+      setPaymentError(userMessage);
+      Alert.alert('Error en el pago', userMessage);
     } finally {
       setIsProcessing(false);
     }
   };
 
   const closeModal = () => {
+    Keyboard.dismiss();
     setPaymentStep('selection');
     setSelectedDoctor(null);
     setPaymentError(null);
     setCardName('');
     setCitaId(null);
+    setCardDetails(null);
+    setAvailableCanjes([]);
+    setSelectedCanjePaciente(null);
+    if (route.params?.citaId) {
+      navigation.setParams({
+        citaId: undefined,
+        doctorId: undefined,
+        doctorName: undefined,
+        precio: undefined,
+      });
+    }
   };
 
   const showAppointmentDetails = (appointment: any) => {
@@ -1124,26 +1435,26 @@ export default function ScheduleScreen({ navigation, route }: any) {
                   <View style={[
                     detailsModalStyles.statusBadge,
                     selectedAppointment.estado === 'pendiente' && !selectedAppointment.tienePago ? detailsModalStyles.pendingPaymentStatus :
-                    selectedAppointment.estado === 'pagada' || (selectedAppointment.estado === 'pendiente' && selectedAppointment.tienePago) ? detailsModalStyles.paidStatus :
+                    selectedAppointment.estado === 'pendiente_pagado' || (selectedAppointment.estado === 'pendiente' && selectedAppointment.tienePago) ? detailsModalStyles.paidStatus :
                     selectedAppointment.estado === 'confirmada' ? detailsModalStyles.confirmedStatus :
                     detailsModalStyles.completedStatus
                   ]}>
                     <Ionicons 
                       name={
                         selectedAppointment.estado === 'pendiente' && !selectedAppointment.tienePago ? "time-outline" :
-                        selectedAppointment.estado === 'pagada' || (selectedAppointment.estado === 'pendiente' && selectedAppointment.tienePago) ? "card-outline" :
+                        selectedAppointment.estado === 'pendiente_pagado' || (selectedAppointment.estado === 'pendiente' && selectedAppointment.tienePago) ? "card-outline" :
                         selectedAppointment.estado === 'confirmada' ? "checkmark-circle" : "checkmark-done-circle"
                       } 
                       size={16} 
                       color={
                         selectedAppointment.estado === 'pendiente' && !selectedAppointment.tienePago ? COLORS.pendingPayment :
-                        selectedAppointment.estado === 'pagada' || (selectedAppointment.estado === 'pendiente' && selectedAppointment.tienePago) ? COLORS.paid :
+                        selectedAppointment.estado === 'pendiente_pagado' || (selectedAppointment.estado === 'pendiente' && selectedAppointment.tienePago) ? COLORS.paid :
                         selectedAppointment.estado === 'confirmada' ? COLORS.success : COLORS.primary
                       } 
                     />
                     <Text style={detailsModalStyles.statusText}>
                       {selectedAppointment.estado === 'pendiente' && !selectedAppointment.tienePago ? 'Pendiente de pago' :
-                       selectedAppointment.estado === 'pagada' || (selectedAppointment.estado === 'pendiente' && selectedAppointment.tienePago) ? 'Pagada - Esperando confirmación' :
+                       selectedAppointment.estado === 'pendiente_pagado' || (selectedAppointment.estado === 'pendiente' && selectedAppointment.tienePago) ? 'Pagada - Esperando confirmación' :
                        selectedAppointment.estado === 'confirmada' ? 'Confirmada' : 'Atendida'}
                     </Text>
                   </View>
@@ -1175,22 +1486,31 @@ export default function ScheduleScreen({ navigation, route }: any) {
       </Modal>
 
       {/* MODAL DE PAGO */}
-      <Modal visible={paymentStep !== 'selection'} transparent animationType="slide">
+      <Modal
+        visible={paymentStep !== 'selection'}
+        transparent
+        animationType="slide"
+        onRequestClose={closeModal}
+      >
         <View style={styles.modalOverlay}>
           <KeyboardAvoidingView
             style={styles.paymentKeyboardContainer}
             behavior={Platform.OS === 'ios' ? 'padding' : undefined}
             keyboardVerticalOffset={Platform.OS === 'ios' ? 18 : 0}
           >
-            <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
-              <View style={styles.paymentKeyboardContent}>
+            <View style={styles.paymentKeyboardContent}>
                 <ScrollView
                   style={styles.paymentScrollView}
                   contentContainerStyle={styles.paymentScrollContent}
-                  keyboardShouldPersistTaps="handled"
+                  keyboardShouldPersistTaps="always"
+                  keyboardDismissMode="on-drag"
+                  nestedScrollEnabled
                   showsVerticalScrollIndicator={false}
                 >
                   <View style={styles.paymentCard}>
+                    <TouchableOpacity onPress={closeModal} style={styles.paymentCloseButton} disabled={isProcessing}>
+                      <Ionicons name="close" size={24} color={COLORS.textLight} />
+                    </TouchableOpacity>
                     {paymentStep === 'checkout' && citaId ? (
                       <>
                         <Text style={styles.modalTitle}>Resumen de la Cita</Text>
@@ -1204,14 +1524,97 @@ export default function ScheduleScreen({ navigation, route }: any) {
                             <Text style={styles.receiptLabel}>Servicio:</Text>
                             <Text style={styles.receiptValue}>Consulta Nutricional</Text>
                           </View>
+                          <View style={styles.receiptLine}>
+                            <Text style={styles.receiptLabel}>Tarifa original:</Text>
+                            <Text style={styles.receiptValue}>
+                              ${paymentPreview.montoOriginal.toLocaleString('es-MX')} MXN
+                            </Text>
+                          </View>
+                          {selectedCanjePaciente && paymentPreview.eligible && (
+                            <View style={styles.receiptLine}>
+                              <Text style={styles.receiptLabel}>Canje aplicado:</Text>
+                              <Text style={styles.discountValue}>
+                                -${paymentPreview.descuentoAplicado.toLocaleString('es-MX')} MXN
+                              </Text>
+                            </View>
+                          )}
                           <View style={styles.divider} />
                           <View style={styles.receiptLine}>
                             <Text style={styles.totalLabel}>Total a pagar:</Text>
                             <Text style={styles.totalValue}>
-                              ${selectedDoctor?.price ? selectedDoctor.price.toLocaleString('es-MX') : '0.00'} MXN
+                              ${paymentPreview.montoFinal.toLocaleString('es-MX')} MXN
                             </Text>
                           </View>
                         </View>
+
+                        {/* Sección de recompensas: solo se muestra si hay canjes o si está cargando */}
+                        {(loadingCanjes || availableCanjes.length > 0) && (
+                        <View style={styles.canjesCheckoutSection}>
+                          <Text style={styles.canjesCheckoutTitle}>🎁 Mis recompensas</Text>
+                          <Text style={styles.canjesCheckoutSubtitle}>
+                            Aplica una recompensa ganada a esta consulta.
+                          </Text>
+
+                          {loadingCanjes ? (
+                            <View style={styles.canjesLoadingRow}>
+                              <ActivityIndicator color={COLORS.primary} size="small" />
+                              <Text style={styles.canjesLoadingText}>Cargando recompensas...</Text>
+                            </View>
+                          ) : availableCanjes.length > 0 ? (
+                            <>
+                              <TouchableOpacity
+                                style={[
+                                  styles.canjeOptionCard,
+                                  !selectedCanjePaciente && styles.canjeOptionCardSelected,
+                                ]}
+                                onPress={() => setSelectedCanjePaciente(null)}
+                              >
+                                <View style={styles.canjeOptionContent}>
+                                  <Text style={styles.canjeOptionTitle}>Sin canje</Text>
+                                  <Text style={styles.canjeOptionDescription}>Pagar tarifa completa</Text>
+                                </View>
+                              </TouchableOpacity>
+
+                              {availableCanjes.map((canjePaciente: any) => {
+                                const preview = getCanjePreview(Number(selectedDoctor?.price || 0), canjePaciente);
+                                const isSelected = selectedCanjePaciente?.id_canje_paciente === canjePaciente.id_canje_paciente;
+
+                                return (
+                                  <TouchableOpacity
+                                    key={canjePaciente.id_canje_paciente}
+                                    style={[
+                                      styles.canjeOptionCard,
+                                      isSelected && styles.canjeOptionCardSelected,
+                                      !preview.eligible && styles.canjeOptionCardDisabled,
+                                    ]}
+                                    disabled={!preview.eligible}
+                                    onPress={() => setSelectedCanjePaciente(canjePaciente)}
+                                  >
+                                    <View style={styles.canjeOptionContent}>
+                                      <Text style={styles.canjeOptionTitle}>{canjePaciente.canjes?.nombre_canje}</Text>
+                                      <Text style={styles.canjeOptionDescription}>
+                                        {preview.descripcion || 'Canje disponible'}
+                                      </Text>
+                                      {preview.eligible ? (
+                                        <Text style={styles.canjeOptionSavings}>
+                                          Ahorras ${preview.descuentoAplicado.toLocaleString('es-MX')} MXN
+                                        </Text>
+                                      ) : (
+                                        <Text style={styles.canjeOptionWarning}>{preview.ineligibleReason}</Text>
+                                      )}
+                                    </View>
+                                    {isSelected && preview.eligible && (
+                                      <Ionicons name="checkmark-circle" size={22} color={COLORS.primary} />
+                                    )}
+                                  </TouchableOpacity>
+                                );
+                              })}
+                            </>
+                          ) : (
+                            <Text style={styles.canjesEmptyText}>No tienes recompensas disponibles aún.</Text>
+                          )}
+                        </View>
+                        )}
 
                         <View style={paymentStyles.paymentContainer}>
                           <Text style={paymentStyles.paymentTitle}>Método de pago</Text>
@@ -1260,7 +1663,7 @@ export default function ScheduleScreen({ navigation, route }: any) {
                               <ActivityIndicator color={PAYMENT_COLORS.buttonText} size="small" />
                             ) : (
                               <Text style={paymentStyles.payButtonText}>
-                                Pagar ${selectedDoctor?.price ? selectedDoctor.price.toLocaleString('es-MX') : '0.00'} MXN
+                                Pagar ${paymentPreview.montoFinal.toLocaleString('es-MX')} MXN
                               </Text>
                             )}
                           </TouchableOpacity>
@@ -1296,8 +1699,7 @@ export default function ScheduleScreen({ navigation, route }: any) {
                     )}
                   </View>
                 </ScrollView>
-              </View>
-            </TouchableWithoutFeedback>
+            </View>
           </KeyboardAvoidingView>
         </View>
       </Modal>
@@ -1541,14 +1943,53 @@ const styles = StyleSheet.create({
   paymentScrollView: { flex: 1 },
   paymentScrollContent: { flexGrow: 1, justifyContent: 'flex-end' },
   paymentCard: { backgroundColor: COLORS.white, borderTopLeftRadius: 35, borderTopRightRadius: 35, padding: 30, minHeight: 500, alignItems: 'center' },
+  paymentCloseButton: { position: 'absolute', top: 14, right: 14, zIndex: 5, padding: 6 },
   modalTitle: { fontSize: 22, fontWeight: '900', color: COLORS.textDark, marginBottom: 25 },
   receiptContainer: { width: '100%', backgroundColor: COLORS.secondary, padding: 20, borderRadius: 20, borderWidth: 1, borderColor: COLORS.border, marginBottom: 25 },
   receiptLine: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 12 },
   receiptLabel: { color: COLORS.textLight, fontWeight: '700', fontSize: 14 },
   receiptValue: { color: COLORS.textDark, fontWeight: '800', fontSize: 14 },
+  discountValue: { color: COLORS.success, fontWeight: '900', fontSize: 14 },
   divider: { height: 1, backgroundColor: COLORS.border, marginVertical: 10, borderStyle: 'dashed', borderWidth: 0.5 },
   totalLabel: { fontSize: 18, fontWeight: '900', color: COLORS.textDark },
   totalValue: { fontSize: 18, fontWeight: '900', color: COLORS.primary },
+  canjesCheckoutSection: {
+    width: '100%',
+    backgroundColor: COLORS.white,
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    padding: 16,
+    marginBottom: 20,
+  },
+  canjesCheckoutTitle: { fontSize: 15, fontWeight: '900', color: COLORS.textDark, marginBottom: 4 },
+  canjesCheckoutSubtitle: { fontSize: 12, color: COLORS.textLight, marginBottom: 12, lineHeight: 18 },
+  canjesLoadingRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', paddingVertical: 12 },
+  canjesLoadingText: { marginLeft: 10, color: COLORS.textLight, fontWeight: '700' },
+  canjesEmptyText: { color: COLORS.textLight, fontWeight: '700', fontSize: 12 },
+  canjeOptionCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: 16,
+    padding: 12,
+    marginBottom: 10,
+    backgroundColor: COLORS.secondary,
+  },
+  canjeOptionCardSelected: {
+    borderColor: COLORS.primary,
+    backgroundColor: '#EAF8EF',
+  },
+  canjeOptionCardDisabled: {
+    opacity: 0.55,
+  },
+  canjeOptionContent: { flex: 1, paddingRight: 12 },
+  canjeOptionTitle: { fontSize: 13, fontWeight: '900', color: COLORS.textDark, marginBottom: 2 },
+  canjeOptionDescription: { fontSize: 12, color: COLORS.textLight, fontWeight: '700' },
+  canjeOptionSavings: { marginTop: 4, fontSize: 12, color: COLORS.success, fontWeight: '900' },
+  canjeOptionWarning: { marginTop: 4, fontSize: 12, color: COLORS.warning, fontWeight: '800' },
   cancelButton: { padding: 20 },
   cancelButtonText: { color: COLORS.textLight, fontWeight: '800', fontSize: 14 },
   successContainer: { alignItems: 'center', width: '100%', paddingVertical: 20 },

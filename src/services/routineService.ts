@@ -151,7 +151,7 @@ export const routineService = {
 
     // 4. Preparar datos del ejercicio
     const seriesParsed = parseInt(exerciseData.sets) || 3;
-    const repsTrimmed = exerciseData.reps?.trim() || "12";
+    const repsParsed = Number(exerciseData.reps) || 12;
     const desc =
       exerciseData.duration && exerciseData.duration !== "N/A"
         ? `Duración: ${exerciseData.duration} min`
@@ -162,7 +162,7 @@ export const routineService = {
       id_rutina: rutinaId,
       nombre_ejercicio: exerciseData.name.trim(),
       series: seriesParsed,
-      repeticiones: repsTrimmed,
+      repeticiones: repsParsed,
       descripcion: desc,
       orden: nextOrden,
       dia_semana: exerciseData.day, // ← Esto es lo que faltaba (1 a 7)

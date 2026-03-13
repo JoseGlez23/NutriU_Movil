@@ -219,7 +219,11 @@ export default function MyRoutinesScreen({ navigation }: any) {
     }
 
     const selectedDayObj = DAYS_OF_WEEK.find((d) => d.id === selectedDay);
-    const diaSemana = selectedDayObj ? selectedDayObj.value : 1;
+    if (!selectedDayObj) {
+      Alert.alert('Error', 'Debes seleccionar un día válido');
+      return;
+    }
+    const diaSemana = selectedDayObj.value;
 
     setSaving(true);
 
@@ -228,13 +232,15 @@ export default function MyRoutinesScreen({ navigation }: any) {
       const isOnline = Boolean(netInfo.isConnected && netInfo.isInternetReachable !== false);
 
       if (!isOnline) {
+        notifyOffline();
+        setSaving(false);
         return;
       }
 
       const exerciseData = {
         name: newExercise.name.trim(),
         sets: newExercise.sets,
-        reps: newExercise.reps.toString(),
+        reps: Number(newExercise.reps) || 12,
         duration: newExercise.duration,
         day: diaSemana,
       };
@@ -248,10 +254,10 @@ export default function MyRoutinesScreen({ navigation }: any) {
         Alert.alert('Error', typeof error === 'string' ? error : error?.message || 'No se pudo agregar el ejercicio');
       } else if (data) {
         console.log('[handleAddExercise] Ejercicio agregado:', data);
-        setExercises((prev) => {
-          const safePrev = Array.isArray(prev) ? prev : [];
-          return [...safePrev, { ...data, dia_semana: diaSemana }];
-        });
+        const updatedExercises = [...(Array.isArray(exercises) ? exercises : []), { ...data, dia_semana: diaSemana }];
+        setExercises(updatedExercises);
+        const cacheKey = `exercises_${user.id_paciente}`;
+        await saveToCache(cacheKey, updatedExercises);
         showExerciseFeedback('Éxito', 'Ejercicio agregado correctamente', 'success');
 
         setNewExercise({ name: '', sets: 3, reps: 12, duration: 15 });

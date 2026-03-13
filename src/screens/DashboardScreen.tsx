@@ -96,6 +96,10 @@ const NotificationBell = ({ onPress, unreadCount }: any) => (
 );
 
 const NotificationModal = ({ visible, onClose, notifications, onMarkAsRead, onClearAll, onAcceptAppointment, onRejectAppointment, onGoToPayment, onDenyAppointment, onViewNotification }: any) => {
+  const getNotificationStatus = (item: any) => {
+    return String(item?.datos_adicionales?.estado || item?.estado || '').toLowerCase();
+  };
+
   const isPointsNotification = (item: any) => {
     const subtipo = item?.datos_adicionales?.subtipo;
     if (subtipo === 'puntos_asignados') return true;
@@ -117,14 +121,27 @@ const NotificationModal = ({ visible, onClose, notifications, onMarkAsRead, onCl
   const isPendingPaymentNotification = (item: any) => {
     if (isPointsNotification(item) || isDietNotification(item)) return false;
 
-    const estado = item.estado || item.datos_adicionales?.estado;
+    const estado = getNotificationStatus(item);
+    const requierePago = item?.datos_adicionales?.requiere_pago === true;
+
+    if (estado === 'pendiente_pagado' || estado === 'pagada' || estado === 'confirmada' || estado === 'cancelada' || estado === 'rechazada') {
+      return false;
+    }
+
     return (
       item.tipo === 'cita_pendiente_pago' ||
-      item.tipo === 'pago' ||
-      item.datos_adicionales?.requiere_pago === true ||
+      (item.tipo === 'pago' && (requierePago || estado === 'pendiente_pago')) ||
+      requierePago ||
       estado === 'pendiente_pago' ||
       (item.tipo === 'cita' && estado === 'pendiente' && !!item.datos_adicionales?.id_cita)
     );
+  };
+
+  const isPaidAppointmentNotification = (item: any) => {
+    if (isPointsNotification(item) || isDietNotification(item)) return false;
+
+    const estado = getNotificationStatus(item);
+    return estado === 'pendiente_pagado' || estado === 'pagada';
   };
 
   const isViewOnlyNotification = (item: any) => {
@@ -173,8 +190,17 @@ const NotificationModal = ({ visible, onClose, notifications, onMarkAsRead, onCl
         </View>
       )}
 
+      {isPaidAppointmentNotification(item) && (
+        <View style={styles.notificationActions}>
+          <View style={styles.statusBadgePaid}>
+            <Ionicons name="checkmark-circle-outline" size={18} color={COLORS.accept} />
+            <Text style={styles.statusBadgePaidText}>Cita pagada</Text>
+          </View>
+        </View>
+      )}
+
       {/* Compatibilidad con flujo anterior */}
-      {!isPendingPaymentNotification(item) && !isViewOnlyNotification(item) && item.tipo === 'cita' && item.estado === 'pendiente' && (
+      {!isPendingPaymentNotification(item) && !isPaidAppointmentNotification(item) && !isViewOnlyNotification(item) && item.tipo === 'cita' && getNotificationStatus(item) === 'pendiente' && (
         <View style={styles.notificationActions}>
           <TouchableOpacity 
             style={[styles.actionButton, styles.acceptButton]}
@@ -529,7 +555,8 @@ export default function DashboardScreen({ navigation }: any) {
 
     setLoadingNotifications(true);
     try {
-      await ensureNutriologoAssignmentNotifications();
+      // Comentado: esta función recreaba notificaciones borradas por el usuario
+      // await ensureNutriologoAssignmentNotifications();
 
       const { data, error } = await supabase
         .from('notificaciones')
@@ -550,7 +577,7 @@ export default function DashboardScreen({ navigation }: any) {
     } finally {
       setLoadingNotifications(false);
     }
-  }, [user, appendPendingPaymentNotifications, ensureNutriologoAssignmentNotifications, notifyOffline]);
+  }, [user, appendPendingPaymentNotifications, notifyOffline]);
 
   // Cargar notificaciones cuando el usuario esté disponible
   useEffect(() => {
@@ -670,8 +697,22 @@ export default function DashboardScreen({ navigation }: any) {
     const datos = notification?.datos_adicionales || {};
     const citaId = Number(datos.id_cita);
     const doctorId = Number(datos.id_nutriologo);
-    const doctorName = datos.doctor_nombre || 'Nutriólogo';
-    const precio = Number(datos.precio || 800);
+    let doctorName = datos.doctor_nombre || 'Nutriólogo';
+    let precio = Number(datos.precio || 0);
+
+    if (doctorId && (!precio || precio <= 0 || !datos.doctor_nombre)) {
+      const { data: nutriologoData, error: nutriologoError } = await supabase
+        .from('nutriologos')
+        .select('nombre, apellido, tarifa_consulta')
+        .eq('id_nutriologo', doctorId)
+        .maybeSingle();
+
+      if (!nutriologoError && nutriologoData) {
+        const resolvedName = `${nutriologoData.nombre || ''} ${nutriologoData.apellido || ''}`.trim();
+        doctorName = resolvedName || doctorName;
+        precio = Number(nutriologoData.tarifa_consulta || precio || 0);
+      }
+    }
 
     await markAsRead(notification.id_notificacion);
     setNotificationsVisible(false);
@@ -1463,6 +1504,24 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '600',
     marginLeft: 5,
+  },
+  statusBadgePaid: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#E8F5E9',
+    borderWidth: 1,
+    borderColor: '#B7DEC0',
+    borderRadius: 999,
+    paddingVertical: 8,
+    paddingHorizontal: 14,
+    gap: 6,
+    minWidth: 150,
+  },
+  statusBadgePaidText: {
+    color: COLORS.accept,
+    fontSize: 14,
+    fontWeight: '700',
   },
   emptyNotifications: {
     padding: 50,
