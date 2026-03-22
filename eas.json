@@ -6,13 +6,22 @@
   "build": {
     "development": {
       "developmentClient": true,
-      "distribution": "internal"
+      "distribution": "internal",
+      "hooks": {
+        "prebuild": "node scripts/generate-google-services.js"
+      }
     },
     "preview": {
-      "distribution": "internal"
+      "distribution": "internal",
+      "hooks": {
+        "prebuild": "node scripts/generate-google-services.js"
+      }
     },
     "production": {
-      "autoIncrement": true
+      "autoIncrement": true,
+      "hooks": {
+        "prebuild": "node scripts/generate-google-services.js"
+      }
     }
   },
   "submit": {

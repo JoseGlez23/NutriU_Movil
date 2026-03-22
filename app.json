@@ -29,7 +29,8 @@
         "foregroundImage": "./assets/icon2.png",
         "backgroundColor": "#F0FFF4"
       },
-      "package": "com.tunombre.nutriu",
+      "package": "com.josemg.nutriu",
+      "googleServicesFile": "./android/app/google-services.json",
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false,
       "permissions": [
@@ -63,9 +64,9 @@
       "supabaseUrl": "https://hthnkzwjotwqhvjgqhfv.supabase.co",
       "supabaseAnonKey": "sb_publishable_KjVW1x9pLbfJ0cbH3UwlzQ_JzfO6Mbw",
       "eas": {
-        "projectId": "0f9f6edb-a387-4eca-a8c7-942271397187"
+        "projectId": "19cdedc0-fff8-48d5-9abb-b5822371adc3"
       }
     },
-    "owner": "matita23"
+    "owner": "josemata23"
   }
 }
