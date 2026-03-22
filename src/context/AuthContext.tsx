@@ -1,7 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, useRef } from 'react';
 import { Session, User } from '@supabase/supabase-js';
 import { supabase } from '../lib/supabase';
-import { registerForPushNotifications, syncMealPlanNotifications, syncMissedMealRemindersToInbox, unregisterPushToken } from '../services/notificationService';
+// ...existing code...
 
 interface AuthContextType {
   session: Session | null;
@@ -42,12 +42,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [session, setSession] = useState<Session | null>(null);
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
-  const [pushToken, setPushToken] = useState<string | null>(null);
   const isPasswordRecoveryFlowRef = useRef(false);
-  const lastPushSetupRef = useRef<{ authUserId: string | null; at: number }>({
-    authUserId: null,
-    at: 0,
-  });
 
   const syncPatientEmailWithAuth = async (authUser: User) => {
     const normalizedEmail = authUser.email?.trim().toLowerCase();
@@ -89,17 +84,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
       setLoading(false);
 
-      // No bloquear el arranque por registro de notificaciones push.
       if (session?.user) {
         void syncPatientEmailWithAuth(session.user);
-        void registerPushNotificationsForUser(session.user);
       }
     });
 
     // Escuchar cambios en la autenticación
     const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
-      // Durante recuperación por OTP no debemos "loggear" visualmente al usuario,
-      // aunque Supabase cree una sesión temporal para permitir updateUser(password).
       if (isPasswordRecoveryFlowRef.current && session) {
         setSession(null);
         setUser(null);
@@ -114,114 +105,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
       if (session?.user) {
         void syncPatientEmailWithAuth(session.user);
-        void registerPushNotificationsForUser(session.user);
       }
     });
 
     return () => subscription.unsubscribe();
   }, []);
 
-  // Función auxiliar para registrar notificaciones push
-  const registerPushNotificationsForUser = async (authUser: User) => {
-    const now = Date.now();
-    if (
-      lastPushSetupRef.current.authUserId === authUser.id &&
-      now - lastPushSetupRef.current.at < 15000
-    ) {
-      return;
-    }
-    lastPushSetupRef.current = { authUserId: authUser.id, at: now };
-
-    try {
-      // Priorizar id_auth_user para evitar fallas si el correo difiere por mayusculas/edicion.
-      const { data: pacienteByAuth } = await supabase
-        .from('pacientes')
-        .select('id_paciente')
-        .eq('id_auth_user', authUser.id)
-        .maybeSingle();
-
-      let pacienteId: number | null = pacienteByAuth?.id_paciente ?? null;
-
-      if (!pacienteId && authUser.email) {
-        const { data: pacienteByEmail } = await supabase
-          .from('pacientes')
-          .select('id_paciente')
-          .eq('correo', authUser.email.toLowerCase())
-          .maybeSingle();
-
-        pacienteId = pacienteByEmail?.id_paciente ?? null;
-      }
-
-      if (!pacienteId) {
-        console.warn('[AUTH] No se encontro paciente para registrar push token');
-        return;
-      }
-
-      const token = await registerForPushNotifications(pacienteId);
-      if (token) {
-        setPushToken(token);
-        console.log('[AUTH] Notificaciones push registradas exitosamente');
-      }
-
-      const { data: activeDiet, error: activeDietError } = await supabase
-        .from('dietas')
-        .select('id_dieta')
-        .eq('id_paciente', pacienteId)
-        .eq('activa', true)
-        .order('created_at', { ascending: false })
-        .limit(1)
-        .maybeSingle();
-
-      if (activeDietError) {
-        console.warn('[AUTH] No se pudo obtener la dieta activa:', activeDietError.message);
-      }
-
-      const activeDietId = activeDiet?.id_dieta ?? null;
-      if (!activeDietId) {
-        console.log('[AUTH] No hay dieta activa para sincronizar recordatorios');
-        return;
-      }
-
-      const { data: remindersData, error: remindersError } = await supabase
-        .from('dieta_detalle')
-        .select(`
-          dia_semana,
-          tipo_comida,
-          descripcion,
-          horario
-        `)
-        .eq('id_dieta', activeDietId)
-        .not('horario', 'is', null);
-
-      if (!remindersError && remindersData) {
-        console.log('[AUTH] Sincronizando recordatorios de comida:', remindersData.length);
-        
-        await syncMealPlanNotifications(
-          pacienteId,
-          remindersData.map((item: any) => ({
-            diaSemana: Number(item.dia_semana || 0),
-            tipoComida: String(item.tipo_comida || 'Comida'),
-            descripcion: item.descripcion || null,
-            horario: item.horario || null,
-          }))
-        );
-
-        const missedResult = await syncMissedMealRemindersToInbox(
-          pacienteId,
-          remindersData.map((item: any) => ({
-            diaSemana: Number(item.dia_semana || 0),
-            tipoComida: String(item.tipo_comida || 'Comida'),
-            descripcion: item.descripcion || null,
-            horario: item.horario || null,
-          }))
-        );
-        
-        console.log('[AUTH] Resultado de sincronización de recordatorios vencidos:', missedResult);
-      }
-    } catch (error) {
-      console.error('[AUTH] Error registrando notificaciones push:', error);
-    }
-  };
+  // ...existing code...
 
   const signIn = async (email: string, password: string) => {
     try {
@@ -480,32 +370,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const signOut = async () => {
     try {
-      // Desregistrar token de notificaciones si existe
-      if (pushToken && user?.id) {
-        const { data: pacienteByAuth } = await supabase
-          .from('pacientes')
-          .select('id_paciente')
-          .eq('id_auth_user', user.id)
-          .maybeSingle();
-
-        let pacienteData = pacienteByAuth;
-
-        if (!pacienteData?.id_paciente && user.email) {
-          const { data: pacienteByEmail } = await supabase
-            .from('pacientes')
-            .select('id_paciente')
-            .eq('correo', user.email.toLowerCase())
-            .maybeSingle();
-          pacienteData = pacienteByEmail;
-        }
-
-        if (pacienteData?.id_paciente) {
-          await unregisterPushToken(pacienteData.id_paciente, pushToken);
-        }
-      }
-
       await supabase.auth.signOut();
-      setPushToken(null);
     } catch (error) {
       console.error('Error al cerrar sesión:', error);
       throw error;

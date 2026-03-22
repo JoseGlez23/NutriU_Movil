@@ -44,7 +44,7 @@ import NetInfo from '@react-native-community/netinfo';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import * as Print from 'expo-print';
 import * as Sharing from 'expo-sharing';
-import { syncMealPlanNotifications } from '../services/notificationService';
+// ...existing code...
 
 const COLORS = {
   primary: '#2E8B57',
@@ -392,9 +392,7 @@ export default function FoodTrackingScreen({ navigation }: any) {
             horario: item.horario || null,
           }));
 
-          // Solo sincronizar recordatorios programados. La sincronización de recordatorios 
-          // vencidos se ejecuta una sola vez en AuthContext durante el login para evitar "avalanchas"
-          await syncMealPlanNotifications(user.id_paciente, mappedReminders);
+          // ...notificaciones push eliminadas...
         }
 
         const diaMap: Record<(typeof DAYS)[number], number> = {

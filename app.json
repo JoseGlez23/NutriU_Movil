@@ -30,7 +30,7 @@
         "backgroundColor": "#F0FFF4"
       },
       "package": "com.josemg.nutriu",
-      "googleServicesFile": "./android/app/google-services.json",
+      // "googleServicesFile": "./android/app/google-services.json",
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false,
       "permissions": [
