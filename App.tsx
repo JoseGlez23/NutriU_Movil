@@ -453,6 +453,10 @@ export default function App() {
     };
   }, []);
 
+  // Log para depuración de la clave de Stripe y la URL del backend
+  console.log('🔑 Stripe publishable key:', process.env.EXPO_PUBLIC_STRIPE_PUBLISHABLE_KEY);
+  console.log('🌐 Backend URL:', process.env.EXPO_PUBLIC_BACKEND_URL);
+
   return (
     <StripeProvider
       publishableKey={process.env.EXPO_PUBLIC_STRIPE_PUBLISHABLE_KEY!}

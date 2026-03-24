@@ -21,7 +21,8 @@
     },
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.josemg.nutriu"
+      "bundleIdentifier": "com.josemg.nutriu",
+      "merchantIdentifier": "merchant.com.josemg.nutriu"
     },
     "android": {
       "icon": "./assets/icon2.png",
@@ -30,7 +31,6 @@
         "backgroundColor": "#F0FFF4"
       },
       "package": "com.josemg.nutriu",
-      // "googleServicesFile": "./android/app/google-services.json",
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false,
       "permissions": [
@@ -58,15 +58,21 @@
           }
         }
       ],
-      "expo-font"
+      "expo-font",
+      [
+        "@stripe/stripe-react-native",
+        {
+          "merchantIdentifier": "merchant.com.josemg.nutriu"
+        }
+      ]
     ],
     "extra": {
       "supabaseUrl": "https://hthnkzwjotwqhvjgqhfv.supabase.co",
       "supabaseAnonKey": "sb_publishable_KjVW1x9pLbfJ0cbH3UwlzQ_JzfO6Mbw",
       "eas": {
-        "projectId": "19cdedc0-fff8-48d5-9abb-b5822371adc3"
+        "projectId": "45e7db53-7bf9-4f44-826f-94e6a1cefa8a"
       }
     },
-    "owner": "josemata23"
+    "owner": "josecgm"
   }
 }

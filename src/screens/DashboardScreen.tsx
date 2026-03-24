@@ -892,37 +892,20 @@ export default function DashboardScreen({ navigation }: any) {
   const handleAcceptAppointment = async (notification: any) => {
     try {
       const datos = notification.datos_adicionales || {};
-      // Actualizar estado de la cita
-      const { error: citaError } = await supabase
-        .from('citas')
-        .update({ estado: 'confirmada' })
-        .eq('id_cita', datos.id_cita);
-
-      if (citaError) throw citaError;
-
-      // Crear notificación de confirmación
-      const { error: notifError } = await supabase
-        .from('notificaciones')
-        .insert({
-          id_usuario: user?.id_paciente,
-          tipo_usuario: 'paciente',
-          titulo: 'Cita confirmada',
-          mensaje: `Tu cita ha sido confirmada exitosamente`,
-          tipo: 'cita',
-          datos_adicionales: { id_cita: datos.id_cita, estado: 'confirmada' }
-        });
-
-      if (notifError) throw notifError;
-
+      
       // Marcar notificación original como leída
       await markAsRead(notification.id_notificacion);
 
-      // Redirigir automáticamente a la pantalla de pago
+      // Redirigir directamente a la pantalla de pago sin cambiar estado de la cita
       setNotificationsVisible(false);
-      safeNavigate('Schedule', { initialTab: 'pendientes', fromNotificationTap: true, openPaymentForCita: datos.id_cita });
+      safeNavigate('Schedule', { 
+        citaId: datos.id_cita,
+        initialTab: 'agendar',
+        fromNotification: true 
+      });
       await loadNotifications(); // Recargar notificaciones
     } catch (error) {
-      Alert.alert('Error', 'No se pudo confirmar la cita');
+      Alert.alert('Error', 'No se pudo procesar la cita');
     }
   };
 
@@ -1358,7 +1341,7 @@ const styles = StyleSheet.create({
     borderRadius: 20,
     padding: 20,
     elevation: 5,
-    marginBottom: 30,
+    marginBottom: 15,
     borderWidth: 1,
     borderColor: COLORS.border,
   },
@@ -1370,7 +1353,7 @@ const styles = StyleSheet.create({
   progressBarFill: { height: '100%', backgroundColor: COLORS.primary, borderRadius: 4 },
   progressInfo: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 8 },
   progressText: { fontSize: 11, color: COLORS.primary, fontWeight: '700' },
-  sectionTitle: { fontSize: 18, fontWeight: '800', color: COLORS.textDark, marginBottom: 20, marginTop: 10 },
+  sectionTitle: { fontSize: 18, fontWeight: '800', color: COLORS.textDark, marginBottom: 20, marginTop: 0 },
   grid: { flexDirection: 'column', gap: 12 },
   card: {
     backgroundColor: COLORS.white,

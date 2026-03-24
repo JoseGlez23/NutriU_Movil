@@ -357,24 +357,60 @@ export default function ScheduleScreen({ navigation, route }: any) {
   };
 
   useEffect(() => {
-    const incomingCitaId = Number(route.params?.citaId);
-    if (incomingCitaId && lastProcessedRouteCitaIdRef.current !== incomingCitaId) {
-      lastProcessedRouteCitaIdRef.current = incomingCitaId;
-      setCitaId(incomingCitaId);
-      const doctorId = Number(route.params.doctorId);
-      const doctorPrice = Number(route.params.precio || 800);
-      setSelectedDoctor({ 
-        name: route.params.doctorName || 'Nutriólogo',
-        realId: isNaN(doctorId) ? 0 : doctorId,
-        price: doctorPrice,
-        originalPrice: doctorPrice,
-      });
-      setSelectedCanjePaciente(null);
-      const resolvedId = isNaN(doctorId) ? 0 : doctorId;
-      lastNutriologoIdRef.current = resolvedId;
-      loadAvailableCanjes(resolvedId);
-      setPaymentStep('checkout');
-    }
+    const processIncomingCita = async () => {
+      const incomingCitaId = Number(route.params?.citaId);
+      if (incomingCitaId && lastProcessedRouteCitaIdRef.current !== incomingCitaId) {
+        lastProcessedRouteCitaIdRef.current = incomingCitaId;
+        setCitaId(incomingCitaId);
+        
+        let doctorId = Number(route.params.doctorId);
+        let doctorPrice = Number(route.params.precio || 800);
+        let doctorName = route.params.doctorName || 'Nutriólogo';
+
+        // Si falta doctorId (viene desde notificación), obtener datos de la cita
+        if (isNaN(doctorId) || doctorId === 0) {
+          try {
+            const { data: citaData, error } = await supabase
+              .from('citas')
+              .select(`
+                id_nutriologo,
+                nutriologos!inner (
+                  nombre,
+                  apellido,
+                  tarifa_consulta
+                )
+              `)
+              .eq('id_cita', incomingCitaId)
+              .single();
+
+            if (!error && citaData) {
+              const nutri = Array.isArray(citaData.nutriologos) ? citaData.nutriologos[0] : citaData.nutriologos;
+              if (nutri) {
+                doctorId = citaData.id_nutriologo;
+                doctorPrice = nutri.tarifa_consulta || 800;
+                doctorName = `Dr. ${nutri.nombre} ${nutri.apellido}`;
+              }
+            }
+          } catch (err) {
+            // En caso de error, usar valores por defecto
+          }
+        }
+
+        setSelectedDoctor({ 
+          name: doctorName,
+          realId: isNaN(doctorId) ? 0 : doctorId,
+          price: doctorPrice,
+          originalPrice: doctorPrice,
+        });
+        setSelectedCanjePaciente(null);
+        const resolvedId = isNaN(doctorId) ? 0 : doctorId;
+        lastNutriologoIdRef.current = resolvedId;
+        loadAvailableCanjes(resolvedId);
+        setPaymentStep('checkout');
+      }
+    };
+    
+    processIncomingCita();
   }, [loadAvailableCanjes, route.params]);
 
   useEffect(() => {
@@ -632,13 +668,13 @@ export default function ScheduleScreen({ navigation, route }: any) {
         };
       }) || []).filter((item): item is any => item !== null);
 
-      // Separar citas pendientes
+      // Separar citas pendientes - solo mostrar las del ciclo actual
       const pendingPayment = formatted.filter((a: any) => 
-        a && a.estado === 'pendiente' && !a.tienePago
+        a && a.estado === 'pendiente' && !a.tienePago && a.isCurrentCycle
       );
       
       const paidPending = formatted.filter((a: any) => 
-        a && (a.estado === 'pendiente_pagado' || (a.estado === 'pendiente' && a.tienePago))
+        a && (a.estado === 'pendiente_pagado' || (a.estado === 'pendiente' && a.tienePago)) && a.isCurrentCycle
       );
       
       const confirmed = formatted.filter((a: any) => 
@@ -935,6 +971,8 @@ export default function ScheduleScreen({ navigation, route }: any) {
           .eq('id_nutriologo', selectedDoctor.realId)
           .maybeSingle();
 
+        let esNuevaRelacion = false;
+
         if (relacionExistente) {
           // Actualizar a activo si estaba inactivo
           if (!relacionExistente.activo) {
@@ -942,6 +980,7 @@ export default function ScheduleScreen({ navigation, route }: any) {
               .from('paciente_nutriologo')
               .update({ activo: true, fecha_asignacion: new Date().toISOString() })
               .eq('id_relacion', relacionExistente.id_relacion);
+            esNuevaRelacion = true;
           }
         } else {
           // No tiene relación, crear nueva
@@ -965,7 +1004,37 @@ export default function ScheduleScreen({ navigation, route }: any) {
 
           if (asignacionError) {
             console.error('Error al asignar nutriólogo:', asignacionError);
+          } else {
+            esNuevaRelacion = true;
           }
+        }
+
+        // Crear notificación de bienvenida si es nueva relación
+        if (esNuevaRelacion) {
+          const { data: nutriologoData } = await supabase
+            .from('nutriologos')
+            .select('nombre, apellido')
+            .eq('id_nutriologo', selectedDoctor.realId)
+            .maybeSingle();
+
+          const nutriologoNombre = nutriologoData 
+            ? `Dr. ${nutriologoData.nombre} ${nutriologoData.apellido}`
+            : selectedDoctor.name;
+
+          await supabase
+            .from('notificaciones')
+            .insert({
+              id_usuario: patientData.id_paciente,
+              tipo_usuario: 'paciente',
+              titulo: '¡Bienvenido!',
+              mensaje: `Hola, soy tu nutriólogo ${nutriologoNombre}. Estoy aquí para ayudarte a alcanzar tus metas de salud. ¡Vamos a empezar!`,
+              tipo: 'sistema',
+              datos_adicionales: {
+                subtipo: 'bienvenida_nutriologo',
+                id_nutriologo: selectedDoctor.realId
+              },
+              leida: false
+            });
         }
         
         // Refrescar datos

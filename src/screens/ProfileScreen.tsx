@@ -1215,12 +1215,15 @@ const styles = StyleSheet.create({
   rowLeft: { 
     flexDirection: 'row', 
     alignItems: 'center',
+    flexShrink: 1,
+    paddingRight: 12,
   },
   rowLabel: { 
     marginLeft: 12, 
     fontSize: 14, 
     fontWeight: '600', 
     color: COLORS.textLight,
+    flexShrink: 1,
   },
   
   rowValue: { 
@@ -1228,12 +1231,18 @@ const styles = StyleSheet.create({
     fontWeight: '800', 
     color: COLORS.textDark,
     textAlign: 'right',
+    flexShrink: 1,
+    maxWidth: '55%',
   },
   
   rowValueEmail: {
+    maxWidth: '58%',
+    lineHeight: 18,
   },
   
   inputEmail: {
+    width: '62%',
+    fontSize: 13,
   },
   
   input: {
